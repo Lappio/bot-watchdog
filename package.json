@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
   "scripts": {
     "dev": "wrangler dev",
     "test": "vitest run",
@@ -16,5 +18,8 @@
     "typescript": "7.0.2",
     "vitest": "3.2.7",
     "wrangler": "4.152.0"
+  },
+  "dependencies": {
+    "croner": "^10.0.1"
   }
 }

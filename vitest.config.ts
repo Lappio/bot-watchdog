@@ -9,7 +9,7 @@ export default defineWorkersConfig(async () => ({
         miniflare: {
           // The defineWorkersConfig-compatible pool bundles this runtime version.
           compatibilityDate: '2026-03-10',
-          bindings: { TEST_MIGRATIONS: await readD1Migrations('./migrations') },
+          bindings: { ADMIN_TOKEN: 'test-admin-token', TEST_MIGRATIONS: await readD1Migrations('./migrations') },
         },
       },
     },
