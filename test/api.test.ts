@@ -1,7 +1,11 @@
-import { env, SELF, createExecutionContext } from 'cloudflare:test';
-import { describe, expect, it } from 'vitest';
+import { env, SELF, createExecutionContext, fetchMock } from 'cloudflare:test';
+import { beforeEach, describe, expect, it } from 'vitest';
 import worker from '../src/index';
 import { sha256 } from '../src/security';
+
+beforeEach(() => {
+  fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'POST' }).reply(200, '{}').persist();
+});
 
 const base = 'https://watchdog.test';
 const valid = { name: 'Daily report', schedule: '0 9 * * *', timezone: 'Asia/Shanghai', alert_channel: 'email', alert_target: 'me@example.com' };
@@ -111,7 +115,7 @@ describe('heartbeats', () => {
     expect(detail.recent_heartbeats).toHaveLength(4);
     expect(detail.recent_heartbeats.find((hb: any) => hb.run_id === 'run').message).toHaveLength(2000);
     expect(detail.open_incidents.length).toBeGreaterThanOrEqual(1);
-    expect(detail.open_incidents.every((i: any) => i.kind === 'failed' && i.expected_at === i.opened_at && i.alert_status === 'pending')).toBe(true);
+    expect(detail.open_incidents.every((i: any) => i.kind === 'failed' && i.expected_at === i.opened_at && i.alert_status === 'sent')).toBe(true);
   });
   it.each([{ status: 'bad' }, { run_id: 'x'.repeat(201) }, { output_url: 'ftp://example.com' }, { output_url: 'https://example.com/' + 'x'.repeat(2000) }, { message: 42 }])('validates heartbeat %j', async body => {
     const { ping_token } = await create();

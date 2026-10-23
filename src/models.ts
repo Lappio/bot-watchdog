@@ -8,6 +8,10 @@ export interface Task {
 export interface Incident {
   id: string; task_id: string; kind: 'missed' | 'failed'; expected_at: string;
   opened_at: string; resolved_at: string | null; resolution: string | null;
+  alert_status: 'pending' | 'sent' | 'failed'; alert_error: string | null;
+  rerun_token_hash: string | null; rerun_requested_at: string | null;
+  rerun_status: 'none' | 'requested' | 'succeeded' | 'failed';
+  rerun_response_code: number | null; rerun_error: string | null;
 }
 export function publicTask(task: Task) {
   const { ping_token_hash: _hash, rerun_webhook_secret: _secret, ...rest } = task;

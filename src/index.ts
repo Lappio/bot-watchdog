@@ -1,6 +1,7 @@
 import type { Env } from './env';
 import { runScan } from './scanner';
 import { management } from './api';
+import { rerun } from './rerun';
 import { heartbeat } from './heartbeat';
 import { HttpError, jsonError } from './http';
 import { requireAdmin } from './security';
@@ -23,6 +24,8 @@ export default {
         await requireAdmin(request, env.ADMIN_TOKEN);
         return await management(request, env, api[1], api[2]);
       }
+      const confirm = /^\/rerun\/([^/]+)$/.exec(path);
+      if (confirm) return await rerun(request, env, confirm[1]);
       const hb = /^\/hb\/([^/]+)(\/fail)?$/.exec(path);
       if (hb && (request.method === 'POST' || (request.method === 'GET' && !hb[2]))) {
         return await heartbeat(request, env, hb[1], Boolean(hb[2]));

@@ -23,6 +23,8 @@ export async function heartbeat(request: Request, env: Env, token: string, fail:
   ];
   if (status === 'fail') statements.push(env.DB.prepare("INSERT OR IGNORE INTO incidents (id, task_id, kind, expected_at, opened_at) VALUES (?, ?, 'failed', ?, ?) RETURNING *").bind(randomId('inc_'), task.id, now, now));
   const results = await env.DB.batch<Incident>(statements);
+  task.last_heartbeat_at = now;
+  task.last_status = status;
   for (const incident of results[2].results) await notifyRecovered(env, task, incident);
   for (const incident of results[3]?.results ?? []) await notifyIncidentOpened(env, task, incident);
   return Response.json({ ok: true, task_id: task.id, received_at: now });
