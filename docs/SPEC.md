@@ -32,7 +32,9 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
   message (nullable, truncated to 2000 chars). Index on (task_id, received_at).
 - incidents: id (`inc_`+random), task_id, kind ('missed'|'failed'), expected_at (ISO, the scheduled occurrence; for
   'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|null),
-  alert_status ('pending'|'sent'|'failed'), alert_error, rerun_token_hash, rerun_requested_at, rerun_status
+  alert_status ('pending'|'sent'|'failed'), alert_error (original alert delivery only),
+  recovery_notice_status (null before attempt, otherwise 'sent'|'failed'), recovery_notice_error,
+  rerun_token_hash, rerun_requested_at, rerun_status
   ('none'|'requested'|'succeeded'|'failed'), rerun_response_code, rerun_error.
   UNIQUE(task_id, kind, expected_at) so the scanner is idempotent.
 All timestamps ISO-8601 UTC strings. Use parameterized queries only.

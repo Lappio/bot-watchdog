@@ -9,6 +9,7 @@ export interface Incident {
   id: string; task_id: string; kind: 'missed' | 'failed'; expected_at: string;
   opened_at: string; resolved_at: string | null; resolution: string | null;
   alert_status: 'pending' | 'sent' | 'failed'; alert_error: string | null;
+  recovery_notice_status: 'sent' | 'failed' | null; recovery_notice_error: string | null;
   rerun_token_hash: string | null; rerun_requested_at: string | null;
   rerun_status: 'none' | 'requested' | 'succeeded' | 'failed';
   rerun_response_code: number | null; rerun_error: string | null;

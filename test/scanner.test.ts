@@ -84,3 +84,28 @@ it('records missing email configuration', async () => {
   await runScan({ ...scanEnv(), RESEND_API_KEY: undefined }, now);
   expect(await env.DB.prepare('SELECT alert_error FROM incidents').first('alert_error')).toContain('RESEND_API_KEY');
 });
+it.each([
+  { original: 503, recovery: 200 },
+  { original: 200, recovery: 503 },
+])('preserves original alert delivery when recovery responds $recovery', async ({ original, recovery }) => {
+  const t = await task({ grace_minutes: 1, created_at: '2020-01-01T08:00:00.000Z' });
+  telegram(body => {
+    expect(body.text).toContain('Grace: 1 minute\n');
+    expect(body.text).not.toContain('1 minutes');
+  }, original);
+  await runScan(scanEnv(), new Date('2020-01-01T09:15:00.000Z'));
+  const before = await env.DB.prepare('SELECT * FROM incidents').first<any>();
+  expect(before.recovery_notice_status).toBeNull();
+  expect(before.recovery_notice_error).toBeNull();
+  telegram(undefined, recovery);
+  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  const after = await env.DB.prepare('SELECT * FROM incidents').first<any>();
+  expect(after).toMatchObject({
+    alert_status: before.alert_status, alert_error: before.alert_error,
+    resolution: 'late_heartbeat',
+    recovery_notice_status: recovery === 200 ? 'sent' : 'failed',
+    recovery_notice_error: recovery === 200 ? null : 'Alert provider returned HTTP 503',
+  });
+  // Further heartbeats do not send another recovery notice.
+  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+});

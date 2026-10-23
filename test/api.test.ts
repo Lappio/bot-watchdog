@@ -90,6 +90,12 @@ describe('management', () => {
     expect((await (await fetchIncidents('?status=all')).json<any>()).incidents).toHaveLength(1);
     expect((await fetchIncidents('?status=invalid')).status).toBe(400);
   });
+  it.each([1, 2])('pluralizes snippet grace of %i minutes', async grace_minutes => {
+    const { task, snippet } = await create({ grace_minutes });
+    const expected = `Grace: ${grace_minutes} minute${grace_minutes === 1 ? '' : 's'}\n`;
+    expect(snippet).toContain(expected);
+    expect(await (await api(`/${task.id}/snippet`)).text()).toContain(expected);
+  });
   it('rotates tokens and invalidates the original', async () => {
     const result = await create();
     const rotated = await (await api(`/${result.task.id}/rotate-token`, 'POST')).json<any>();

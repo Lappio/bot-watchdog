@@ -24,10 +24,13 @@ async function deliver(env: Env, task: Task, subject: string, text: string, link
   if (!response.ok) throw new Error(`Alert provider returned HTTP ${response.status}`);
 }
 
-async function recordDelivery(env: Env, incident: Incident, send: () => Promise<void>): Promise<void> {
+async function recordDelivery(env: Env, incident: Incident, send: () => Promise<void>, recovery = false): Promise<void> {
   let error: string | null = null;
   try { await send(); } catch (cause) { error = (cause instanceof Error ? cause.message : 'Alert delivery failed').slice(0, 1000); }
-  await env.DB.prepare('UPDATE incidents SET alert_status = ?, alert_error = ? WHERE id = ?').bind(error === null ? 'sent' : 'failed', error, incident.id).run();
+  const sql = recovery
+    ? 'UPDATE incidents SET recovery_notice_status = ?, recovery_notice_error = ? WHERE id = ?'
+    : 'UPDATE incidents SET alert_status = ?, alert_error = ? WHERE id = ?';
+  await env.DB.prepare(sql).bind(error === null ? 'sent' : 'failed', error, incident.id).run();
 }
 
 export async function notifyIncidentOpened(env: Env, task: Task, incident: Incident, rerunToken?: string): Promise<void> {
@@ -42,7 +45,7 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
     }
     const kind = incident.kind === 'failed' ? 'reported failure' : 'missed';
     const local = new Intl.DateTimeFormat('en-GB', { timeZone: task.timezone, dateStyle: 'full', timeStyle: 'long' }).format(new Date(incident.expected_at));
-    const lines = [task.name, `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minutes`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
+    const lines = [task.name, `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minute${task.grace_minutes === 1 ? '' : 's'}`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
     if (incident.kind === 'failed') {
       const heartbeat = await env.DB.prepare('SELECT message FROM heartbeats WHERE task_id = ? AND received_at = ? AND status = ? ORDER BY id LIMIT 1').bind(task.id, incident.expected_at, 'fail').first<{ message: string | null }>();
       if (heartbeat?.message) lines.push(`Failure message: ${heartbeat.message}`);
@@ -52,5 +55,5 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
   });
 }
 export async function notifyRecovered(env: Env, task: Task, incident: Incident): Promise<void> {
-  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: late heartbeat received`));
+  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: late heartbeat received`), true);
 }
