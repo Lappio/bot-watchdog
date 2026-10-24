@@ -405,11 +405,13 @@ build; generated files in that directory are ignored. Keep this placeholder when
 
 ## Dashboard
 
-The React dashboard uses the official [shadcn/ui dashboard-01 block](https://ui.shadcn.com/view/new-york-v4/dashboard-01): a responsive sidebar, overview cards, interactive activity chart, and sortable/filterable task table. Manage tasks, inspect paginated runs and incidents, copy onboarding snippets, and explicitly confirm webhook re-runs. Re-runs never auto-retry. Light, dark, and system themes are supported.
+The React dashboard uses the official [shadcn/ui dashboard-01 block](https://ui.shadcn.com/view/new-york-v4/dashboard-01): a responsive sidebar, overview cards, interactive activity chart, and sortable/filterable task table. Manage tasks, inspect paginated runs and incidents, copy onboarding snippets, and explicitly confirm webhook re-runs. Re-runs never auto-retry. Light, dark, and system themes are supported. The 中/EN language toggle switches between Simplified Chinese and English, defaults to the browser language, and saves the choice as `bw_locale`. Worker-served snippet text remains English.
 
 ![Dashboard overview (light)](docs/screenshots/dashboard-overview-light.png)
 
 ![Task detail with run history (dark)](docs/screenshots/dashboard-task-detail-dark.png)
+
+![Overview in Simplified Chinese (中/EN toggle)](docs/screenshots/dashboard-overview-zh-CN-light.png)
 
 With Node 22 and the Worker configured/migrated as above:
 
@@ -432,4 +434,4 @@ The dashboard is a separate npm package with its own lockfile. `npm run dashboar
 
 shadcn components retained (installed using the real CLI): Alert, AlertDialog, Badge, Breadcrumb, Button, Card, Chart, Dialog, DropdownMenu, Input, Label, Select, Separator, Sheet, Sidebar, Skeleton, Sonner, Switch, Table, Tabs, Tooltip, Textarea. The block initially also installed Avatar, Checkbox, Drawer, Toggle, and ToggleGroup; these unused components and demo drag-and-drop dependencies were removed. Forms use controlled inputs with Zod validation; the data table uses TanStack Table v8.
 
-简体中文：仪表盘提供任务管理、心跳统计图、运行历史和事件查看，支持深色模式及手动确认 webhook 重跑（绝不自动重试）。运行 `npm run dashboard:install && npm run dashboard:build`，再运行 `npx wrangler dev --local`，打开 http://localhost:8787/dashboard/ 并粘贴 `ADMIN_TOKEN` 登录。前端开发可另开终端运行 `npm --prefix dashboard run dev`，通过代理连接 8787 端口的 Worker；创建任务后请保存仅显示一次的心跳令牌。
+简体中文：中/EN 语言切换支持简体中文和英文，默认跟随浏览器语言，选择保存在 `bw_locale` 中。Worker 提供的代码片段文本保持英文。仪表盘提供任务管理、心跳统计图、运行历史和事件查看，支持深色模式及手动确认 webhook 补跑（绝不自动重试）。运行 `npm run dashboard:install && npm run dashboard:build`，再运行 `npx wrangler dev --local`，打开 http://localhost:8787/dashboard/ 并粘贴 `ADMIN_TOKEN` 登录。前端开发可另开终端运行 `npm --prefix dashboard run dev`，通过代理连接 8787 端口的 Worker；创建任务后请保存仅显示一次的心跳令牌。
