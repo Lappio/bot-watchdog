@@ -1,0 +1,73 @@
+import {
+  Activity,
+  LayoutDashboard,
+  ListTodo,
+  TriangleAlert,
+  Settings,
+  LogOut,
+} from "lucide-react";
+import {
+  Sidebar,
+  SidebarContent,
+  SidebarFooter,
+  SidebarHeader,
+  SidebarMenu,
+  SidebarMenuItem,
+  SidebarMenuButton,
+  SidebarGroup,
+} from "@/components/ui/sidebar";
+export function AppSidebar({
+  path,
+  logout,
+}: {
+  path: string;
+  logout: () => void;
+}) {
+  return (
+    <Sidebar collapsible="icon" variant="inset">
+      <SidebarHeader>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton size="lg" asChild>
+              <a href="#/">
+                <Activity />
+                <span className="font-semibold">bot-watchdog</span>
+              </a>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarHeader>
+      <SidebarContent>
+        <SidebarGroup>
+          <SidebarMenu>
+            {[
+              ["Overview", "/", LayoutDashboard],
+              ["Tasks", "/tasks", ListTodo],
+              ["Incidents", "/incidents", TriangleAlert],
+              ["Settings", "/settings", Settings],
+            ].map(([label, url, Icon]) => (
+              <SidebarMenuItem key={String(url)}>
+                <SidebarMenuButton asChild isActive={path === url}>
+                  <a href={`#${url}`}>
+                    <Icon />
+                    <span>{String(label)}</span>
+                  </a>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))}
+          </SidebarMenu>
+        </SidebarGroup>
+      </SidebarContent>
+      <SidebarFooter>
+        <SidebarMenu>
+          <SidebarMenuItem>
+            <SidebarMenuButton onClick={logout}>
+              <LogOut />
+              <span>Log out</span>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        </SidebarMenu>
+      </SidebarFooter>
+    </Sidebar>
+  );
+}
