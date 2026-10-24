@@ -76,11 +76,13 @@ export async function notifyRerunUnknown(env: Env, task: Task, incident: Inciden
     `${task.name}: The previous re-run request may already have been delivered to the webhook but its result was never recorded. Check whether the task actually ran; no automatic retry.`), 'unknown');
 }
 
-export async function notifyMissedReminder(env: Env, task: Task, incident: Incident): Promise<void> {
+export async function notifyMissedReminder(env: Env, task: Task, incident: Incident): Promise<boolean> {
   try {
     await deliver(env, task, `${task.name}: still missing`,
-      `${task.name}: still missing, ${incident.occurrence_count} missed occurrences since ${incident.opened_at}, last expected ${incident.last_occurrence_at ?? incident.expected_at}. Reply by sending a heartbeat to resolve this incident.`);
+      `${task.name}: still missing, ${incident.occurrence_count} missed occurrences since ${incident.expected_at}, last expected ${incident.last_occurrence_at ?? incident.expected_at}. Reply by sending a heartbeat to resolve this incident.`);
+    return true;
   } catch (error) {
     console.error('Missed reminder delivery failed', incident.id, error instanceof Error ? error.message : 'Unknown error');
+    return false;
   }
 }

@@ -45,11 +45,22 @@ export async function runScan(env: Env, now: Date): Promise<{ checked: number; o
         const reference = open.last_reminder_at ?? open.opened_at;
         const interval = Math.min(24 * 3600000, Math.max(3600000, Date.parse(reference) - Date.parse(open.opened_at)));
         if (now.getTime() - Date.parse(reference) >= interval) {
-          const claimed = await env.DB.prepare('UPDATE incidents SET last_reminder_at = ? WHERE id = ? AND resolved_at IS NULL AND last_reminder_at IS ?')
-            .bind(now.toISOString(), open.id, open.last_reminder_at).run();
+          // A separate lease serializes sends without consuming the backoff slot.
+          // It expires after a crash and exceeds the provider's 10-second timeout.
+          const leaseUntil = new Date(now.getTime() + 60000).toISOString();
+          const claimed = await env.DB.prepare('UPDATE incidents SET reminder_claim_until = ? WHERE id = ? AND resolved_at IS NULL AND last_reminder_at IS ? AND (reminder_claim_until IS NULL OR reminder_claim_until <= ?)')
+            .bind(leaseUntil, open.id, open.last_reminder_at, now.toISOString()).run();
           if (claimed.meta.changes === 1) {
-            const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(open.id).first<Incident>();
-            if (current) await notifyMissedReminder(env, task, current);
+            try {
+              const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ? AND resolved_at IS NULL').bind(open.id).first<Incident>();
+              if (current && await notifyMissedReminder(env, task, current)) {
+                await env.DB.prepare('UPDATE incidents SET last_reminder_at = ? WHERE id = ? AND resolved_at IS NULL AND last_reminder_at IS ? AND reminder_claim_until = ?')
+                  .bind(now.toISOString(), open.id, open.last_reminder_at, leaseUntil).run();
+              }
+            } finally {
+              await env.DB.prepare('UPDATE incidents SET reminder_claim_until = NULL WHERE id = ? AND reminder_claim_until = ?')
+                .bind(open.id, leaseUntil).run();
+            }
           }
         }
         continue;

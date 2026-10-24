@@ -29,7 +29,6 @@ export async function heartbeat(request: Request, env: Env, token: string, fail:
     env.DB.prepare('INSERT INTO heartbeats (id, task_id, received_at, status, run_id, output_url, message, dropped_fields) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR NOT EXISTS (SELECT 1 FROM heartbeats WHERE task_id = ? AND run_id = ? AND status = ? AND received_at >= ?)')
       .bind(id, task.id, now, status, runId, dropped.includes('output_url') ? null : body.output_url ?? null, typeof body.message === 'string' ? body.message.slice(0, 2000) : null, dropped.length ? JSON.stringify(dropped) : null, runId, task.id, runId, status, dedupSince),
     env.DB.prepare(`UPDATE tasks SET last_heartbeat_at = ?, last_status = ? WHERE id = ? AND ${gate}`).bind(now, status, task.id, id),
-    env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'late_heartbeat' WHERE task_id = ? AND kind = 'missed' AND resolved_at IS NULL AND expected_at <= ? AND ${gate} RETURNING *`).bind(now, task.id, now, id),
   ];
   if (status === 'fail') {
     statements.push(
@@ -37,6 +36,9 @@ export async function heartbeat(request: Request, env: Env, token: string, fail:
       env.DB.prepare(`INSERT INTO incidents (id, task_id, kind, expected_at, opened_at) SELECT ?, ?, 'failed', ?, ? WHERE ${gate} AND NOT EXISTS (SELECT 1 FROM incidents WHERE task_id = ? AND kind = 'failed' AND resolved_at IS NULL) RETURNING *`).bind(randomId('inc_'), task.id, now, now, id, task.id),
     );
   } else {
+    statements.push(
+      env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'late_heartbeat' WHERE task_id = ? AND kind = 'missed' AND resolved_at IS NULL AND expected_at <= ? AND ${gate} RETURNING *`).bind(now, task.id, now, id),
+    );
     statements.push(env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'recovered' WHERE task_id = ? AND kind = 'failed' AND resolved_at IS NULL AND ${gate} RETURNING *`).bind(now, task.id, id));
   }
   const results = await env.DB.batch<Incident>(statements);
@@ -46,10 +48,10 @@ export async function heartbeat(request: Request, env: Env, token: string, fail:
   }
   task.last_heartbeat_at = now;
   task.last_status = status as 'ok' | 'fail';
-  for (const incident of results[2].results) ctx.waitUntil(notifyRecovered(env, task, incident));
   if (status === 'fail') {
-    for (const incident of results[4].results) ctx.waitUntil(notifyIncidentOpened(env, task, incident));
+    for (const incident of results[3].results) ctx.waitUntil(notifyIncidentOpened(env, task, incident));
   } else {
+    for (const incident of results[2].results) ctx.waitUntil(notifyRecovered(env, task, incident));
     for (const incident of results[3].results) ctx.waitUntil(notifyRecovered(env, task, incident));
   }
   return Response.json({ ok: true, task_id: task.id, received_at: now, ...(dropped.length ? { dropped_fields: dropped } : {}) });

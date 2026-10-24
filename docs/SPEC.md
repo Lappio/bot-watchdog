@@ -59,7 +59,7 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
   `POST /hb/:ping_token` JSON body `{ status?: "ok"|"fail" (default ok), run_id?, output_url?, message? }`
   also `GET /hb/:ping_token` and `POST /hb/:ping_token/fail` as no-body shortcuts (for curl one-liners).
   -> 200 `{ ok: true, task_id, received_at }`; 404 on unknown token. Updates task.last_heartbeat_at/last_status.
-  A heartbeat resolves any open 'missed' incident of that task whose expected_at <= received_at (resolution 'late_heartbeat')
+  Only an ok heartbeat resolves any open 'missed' incident of that task whose expected_at <= received_at (resolution 'late_heartbeat')
   and sends a short "recovered (late)" notice on the task's channel. A status 'fail' heartbeat opens a 'failed' incident
   and queues an alert via ctx.waitUntil; all heartbeat database writes finish before responding, without waiting for delivery.
   Optional run_id must be a string <=200 characters; output_url an HTTP(S) URL <=2000 characters;
@@ -70,7 +70,7 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
   Duplicates return 200 {ok:true, duplicate:true, task_id, received_at:<original time>} with no side effects.
   All incident/task mutations must be gated on insertion of the heartbeat, including concurrent requests.
   While an open failed incident exists, new failures increment occurrence_count and set last_occurrence_at
-  without another incident or alert. Fail heartbeats never resolve failed incidents.
+  without another incident or alert. Fail heartbeats never resolve missed or failed incidents.
   An ok heartbeat resolves open failed incidents with resolution recovered and resolved_at, and queues
   "recovered: an ok heartbeat was received after a failure". Record recovery_notice_status/error separately.
   Missed-incident recovery notices also run via ctx.waitUntil. Tests asserting delivery must await the execution context.
@@ -114,13 +114,17 @@ While a missed incident is open, aggregate newer overdue occurrences with a cond
 `WHERE id = ? AND resolved_at IS NULL AND (last_occurrence_at IS NULL OR last_occurrence_at < due) AND expected_at < due`;
 increment occurrence_count and set last_occurrence_at = due once per observed occurrence. No new normal alert.
 Remind when `now - (last_reminder_at ?? opened_at) >= min(24h, max(1h, (last_reminder_at ?? opened_at) - opened_at))`.
-Atomically claim last_reminder_at with a conditional UPDATE matching its previous value and resolved_at IS NULL;
-only the winner delivers. Text says still missing, N missed occurrences since opened_at, last expected due,
+Serialize sends with a separate conditional reminder_claim_until lease (60 seconds, recoverable after a crash),
+matching the previous last_reminder_at and resolved_at IS NULL. Only the claim winner delivers; release the lease
+after the attempt. Advance last_reminder_at with a conditional compare-and-set only after successful delivery.
+On failure preserve last_reminder_at so the next scan retries. Migration 0005 adds the nullable lease column.
+Text says still missing, N missed occurrences since expected_at, last expected last_occurrence_at ?? expected_at,
 and that sending a heartbeat resolves it. No rerun link. Log reminder delivery failures without overwriting alert_status/error.
 With timely scans reminders occur at approximately +1h, +2h, +4h, +8h, +16h, then every 24h.
-A heartbeat resolves the open missed incident as late_heartbeat; a subsequent miss opens a fresh incident and full alert.
+An ok heartbeat resolves the open missed incident as late_heartbeat; a subsequent miss opens a fresh incident and full alert.
 Limitations: only the latest overdue occurrence is observed per scan; counts do not backfill downtime.
-Scan delays shift reminder timing. Claims precede delivery, so crashes/provider failures can lose reminders; no automatic retry.
+Scan delays shift reminder timing. Provider failures retry on the next scan; a crash leaves the claim retryable after its lease expires.
+A crash after provider acceptance but before recording success can cause a duplicate reminder on retry.
 Tasks whose cron cannot be evaluated increment scan errors and are skipped without affecting other tasks.
 
 ## Onboarding snippet (text the user pastes into their bot's task instructions)

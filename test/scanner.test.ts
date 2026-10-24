@@ -252,11 +252,49 @@ it('aggregates consecutive misses, claims backoff reminders once, and starts fre
   telegram(); await runScan(scanEnv(), new Date(+now + 65 * 3600000 + 120000));
   expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents').first('n')).toBe(2);
 });
-it('logs reminder delivery failure without overwriting the original alert status', async () => {
+it.each([null, '2026-10-24T10:15:00.000Z'])('retries failed reminders without consuming the previous slot %s', async previous => {
   await task(); telegram(); await runScan(scanEnv(), now);
-  telegram(undefined, 503); await runScan(scanEnv(), new Date(+now + 3600000));
-  expect(await env.DB.prepare('SELECT alert_status, alert_error, last_reminder_at FROM incidents').first()).toMatchObject({ alert_status: 'sent', alert_error: null, last_reminder_at: new Date(+now + 3600000).toISOString() });
-  await runScan(scanEnv(), new Date(+now + 3600000));
+  await env.DB.prepare('UPDATE incidents SET last_reminder_at = ?').bind(previous).run();
+  const at = new Date('2026-10-24T11:15:00.000Z');
+  telegram(undefined, 500);
+  await runScan(scanEnv(), at);
+  expect(await env.DB.prepare('SELECT alert_status, alert_error, last_reminder_at, resolved_at FROM incidents').first()).toEqual({ alert_status: 'sent', alert_error: null, last_reminder_at: previous, resolved_at: null });
+  let sends = 0;
+  telegram(() => { sends++; });
+  expect(await runScan(scanEnv(), at)).toMatchObject({ errors: 0 });
+  expect(sends).toBe(1);
+  expect(await env.DB.prepare('SELECT last_reminder_at, resolved_at FROM incidents').first()).toEqual({ last_reminder_at: at.toISOString(), resolved_at: null });
+});
+it('sends exactly one reminder across concurrent scans and uses the first expected time', async () => {
+  await task(); telegram(); await runScan(scanEnv(), now);
+  await env.DB.prepare("UPDATE incidents SET opened_at = '2026-10-24T09:00:05.000Z'").run();
+  let sends = 0;
+  let text = '';
+  fetchMock.get('https://api.telegram.org').intercept({ path: '/bottest-telegram-token/sendMessage', method: 'POST' })
+    .reply(200, options => { sends++; text = JSON.parse(options.body as string).text; return '{}'; }).delay(100);
+  const scans = await Promise.all([runScan(scanEnv(), new Date('2026-10-24T10:15:00Z')), runScan(scanEnv(), new Date('2026-10-24T10:15:00Z'))]);
+  expect(scans.every(scan => scan.errors === 0)).toBe(true);
+  expect(sends).toBe(1);
+  expect(text).toContain('since 2026-10-24T09:00:00.000Z');
+  expect(text).not.toContain('2026-10-24T09:00:05.000Z');
+  expect(text).toContain('last expected 2026-10-24T09:00:00.000Z');
+  expect(await env.DB.prepare('SELECT last_reminder_at FROM incidents').first('last_reminder_at')).toBe('2026-10-24T10:15:00.000Z');
+});
+it('leaves missed incidents open on fail and resolves both kinds only on ok', async () => {
+  const t = await task(); telegram(); await runScan(scanEnv(), now);
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date('2026-10-24T09:16:00Z'));
+  const messages: string[] = [];
+  telegram(body => messages.push(body.text));
+  expect((await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`, { method: 'POST', body: JSON.stringify({ status: 'fail' }) }))).status).toBe(200);
+  expect(await env.DB.prepare("SELECT resolved_at, resolution, recovery_notice_status FROM incidents WHERE kind = 'missed'").first()).toEqual({ resolved_at: null, resolution: null, recovery_notice_status: null });
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM incidents WHERE kind = 'failed' AND resolved_at IS NULL").first('n')).toBe(1);
+  expect(messages).toHaveLength(1);
+  expect(messages[0]).toContain('reported failure');
+  expect(messages.join('\n')).not.toContain('recovered');
+  telegram(); telegram();
+  expect((await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`, { method: 'POST', body: JSON.stringify({ status: 'ok' }) }))).status).toBe(200);
+  expect(await env.DB.prepare("SELECT resolution, resolved_at FROM incidents WHERE kind = 'missed'").first()).toEqual({ resolution: 'late_heartbeat', resolved_at: '2026-10-24T09:16:00.000Z' });
+  expect(await env.DB.prepare("SELECT resolution, resolved_at FROM incidents WHERE kind = 'failed'").first()).toEqual({ resolution: 'recovered', resolved_at: '2026-10-24T09:16:00.000Z' });
 });
 it('skips resolved incidents in the rerun unknown sweep', async () => {
   const t = await task({ paused: 1 });
@@ -296,4 +334,16 @@ it.each(['resume', 'timezone', 'cron'])('opens a full alert after %s moves the a
   telegram(); telegram();
   await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
   expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM incidents WHERE resolution = 'late_heartbeat'").first('n')).toBe(2);
+});
+
+it('retries a reminder after a crashed send claim expires', async () => {
+  await task(); telegram(); await runScan(scanEnv(), now);
+  await env.DB.prepare("UPDATE incidents SET reminder_claim_until = '2026-10-24T10:16:00.000Z'").run();
+  await runScan(scanEnv(), new Date('2026-10-24T10:15:00Z'));
+  expect(await env.DB.prepare('SELECT last_reminder_at FROM incidents').first('last_reminder_at')).toBeNull();
+  let sends = 0;
+  telegram(() => { sends++; });
+  await runScan(scanEnv(), new Date('2026-10-24T10:16:00Z'));
+  expect(sends).toBe(1);
+  expect(await env.DB.prepare('SELECT last_reminder_at, reminder_claim_until FROM incidents').first()).toEqual({ last_reminder_at: '2026-10-24T10:16:00.000Z', reminder_claim_until: null });
 });

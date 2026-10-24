@@ -13,7 +13,7 @@ export interface Incident {
   rerun_token_hash: string | null; rerun_requested_at: string | null;
   rerun_status: 'none' | 'requested' | 'succeeded' | 'failed' | 'unknown';
   rerun_unknown_alert_status: 'sent' | 'failed' | null; rerun_unknown_alert_error: string | null;
-  occurrence_count: number; last_occurrence_at: string | null; last_reminder_at: string | null;
+  occurrence_count: number; last_occurrence_at: string | null; last_reminder_at: string | null; reminder_claim_until: string | null;
   rerun_response_code: number | null; rerun_error: string | null;
 }
 export function publicTask(task: Task) {
