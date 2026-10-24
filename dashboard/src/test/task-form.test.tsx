@@ -1,5 +1,6 @@
+import { render } from "./render-i18n";
 import { it, expect, vi } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { screen, fireEvent } from "@testing-library/react";
 import { TaskForm } from "@/components/task-form";
 import type { Task } from "@/lib/api";
 

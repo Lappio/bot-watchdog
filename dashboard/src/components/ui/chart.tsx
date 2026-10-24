@@ -1,5 +1,7 @@
 "use client";
 
+import { useI18n } from "@/lib/i18n";
+
 import * as React from "react";
 import { cn } from "cn";
 import * as RechartsPrimitive from "recharts";
@@ -143,6 +145,7 @@ function ChartTooltipContent({
     >,
     "accessibilityLayer"
   >) {
+  const { formatNumber } = useI18n();
   const { config } = useChart();
 
   const tooltipLabel = React.useMemo(() => {
@@ -254,7 +257,7 @@ function ChartTooltipContent({
                       {item.value != null && (
                         <span className="font-mono font-medium text-foreground tabular-nums">
                           {typeof item.value === "number"
-                            ? item.value.toLocaleString()
+                            ? formatNumber(item.value)
                             : String(item.value)}
                         </span>
                       )}

@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import {
   Card,
   CardHeader,
@@ -8,30 +9,31 @@ import {
 import { Badge } from "@/components/ui/badge";
 import type { Stats } from "@/lib/api";
 export function SectionCards({ stats }: { stats: Stats }) {
+  const { t: translate, label, plural, formatNumber } = useI18n();
   const t = stats.totals;
   return (
     <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
       {[
-        ["Tasks total", t.tasks, `${t.active} active · ${t.paused} paused`],
+        ["Tasks total", t.tasks, translate("{active} active · {paused} paused", { active: formatNumber(t.active), paused: formatNumber(t.paused) })],
         ["Healthy", t.healthy, "Tasks running on schedule"],
         [
           "Open incidents",
           t.open_incidents,
-          `${t.with_open_incidents} tasks need attention`,
+          plural("{count} task needs attention", "{count} tasks need attention", t.with_open_incidents),
         ],
         [
           "Heartbeats 24h",
           t.heartbeats_24h,
-          `${t.failed_heartbeats_24h} failed`,
+          translate("{count} failed", { count: formatNumber(t.failed_heartbeats_24h) }),
         ],
       ].map(([title, value, detail]) => (
         <Card key={title}>
           <CardHeader>
-            <CardDescription>{title}</CardDescription>
-            <CardTitle className="text-3xl tabular-nums">{value}</CardTitle>
+            <CardDescription>{label(String(title))}</CardDescription>
+            <CardTitle className="text-3xl tabular-nums">{formatNumber(Number(value))}</CardTitle>
           </CardHeader>
           <CardContent>
-            <Badge variant="outline">{detail}</Badge>
+            <Badge variant="outline">{label(String(detail))}</Badge>
           </CardContent>
         </Card>
       ))}

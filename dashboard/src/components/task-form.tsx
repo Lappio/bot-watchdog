@@ -1,3 +1,4 @@
+import { isTranslationKey, useI18n } from "@/lib/i18n";
 import { useState } from "react";
 import { z } from "zod";
 import { api, ApiError, type Task, type Credentials } from "@/lib/api";
@@ -78,6 +79,7 @@ export function TaskForm({
   onClose: () => void;
   onSaved: (credentials?: Credentials) => void;
 }) {
+  const { t, label: translateLabel, formatError } = useI18n();
   const [form, setForm] = useState({
     name: task?.name ?? "",
     bot: task?.bot ?? "",
@@ -95,7 +97,7 @@ export function TaskForm({
       : "{}",
     deliverable_delay_minutes: String(task?.deliverable_delay_minutes ?? 5),
   });
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [errors, setErrors] = useState<Partial<Record<keyof typeof form, string>>>({});
   const [busy, setBusy] = useState(false);
   function field(key: keyof typeof form, value: string | boolean) {
@@ -110,7 +112,7 @@ export function TaskForm({
     "aria-describedby": errors[key] ? `${key}-error` : undefined,
   });
   const fieldError = (key: keyof typeof form) => errors[key] && (
-    <p id={`${key}-error`} className="text-destructive text-sm">{errors[key]}</p>
+    <p id={`${key}-error`} className="text-destructive text-sm">{translateLabel(errors[key]!)}</p>
   );
   const input = (key: keyof typeof form, label: string, type = "text") => (
     <div className="space-y-2">
@@ -137,7 +139,7 @@ export function TaskForm({
         <SelectContent>
           {values.map((v) => (
             <SelectItem key={v} value={v}>
-              {labels[v] ?? v}
+              {translateLabel(labels[v] ?? v)}
             </SelectItem>
           ))}
         </SelectContent>
@@ -147,13 +149,13 @@ export function TaskForm({
   );
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    setError("");
+    setError(null);
     const validation = schema.safeParse(form);
     if (!validation.success) {
       const next: Partial<Record<keyof typeof form, string>> = {};
       for (const issue of validation.error.issues) {
         const key = issue.path[0] as keyof typeof form;
-        next[key] ??= issue.message;
+        next[key] ??= isTranslationKey(issue.message) ? issue.message : "Invalid value";
       }
       setErrors(next);
       return;
@@ -179,7 +181,7 @@ export function TaskForm({
       );
       onSaved(task ? undefined : result);
     } catch (e) {
-      if (e instanceof ApiError) setError(e.message);
+      if (e instanceof ApiError) setError(e);
     } finally {
       setBusy(false);
     }
@@ -193,60 +195,57 @@ export function TaskForm({
     >
       <DialogContent className="max-h-[90svh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>{task ? "Edit task" : "New task"}</DialogTitle>
+          <DialogTitle>{task ? t("Edit task") : t("New task")}</DialogTitle>
           <DialogDescription>
-            Configure the schedule and where to send alerts.
-          </DialogDescription>
+            {t("Configure the schedule and where to send alerts.")}</DialogDescription>
         </DialogHeader>
         <form noValidate onSubmit={save} className="space-y-4">
-          {error && (
+          {!!error && (
             <Alert variant="destructive">
-              <AlertDescription>{error}</AlertDescription>
+              <AlertDescription>{formatError(error)}</AlertDescription>
             </Alert>
           )}
           <div className="grid gap-4 sm:grid-cols-2">
-            {input("name", "Name")}
-            {input("bot", "Bot")}
+            {input("name", t("Name"))}
+            {input("bot", t("Bot"))}
             <Separator className="sm:col-span-2" />
-            <h3 className="font-medium sm:col-span-2">Schedule</h3>
-            {input("schedule", "Schedule (cron)")}
+            <h3 className="font-medium sm:col-span-2">{t("Schedule")}</h3>
+            {input("schedule", t("Schedule (cron)"))}
             {select(
               "timezone",
-              "Timezone",
+              t("Timezone"),
               Array.from(new Set([form.timezone, ...zones])),
             )}
             <p className="text-xs text-muted-foreground sm:col-span-2">
-              Five fields: minute hour day-of-month month day-of-week. Example:
-              0 9 * * * runs daily at 09:00.
-            </p>
-            {input("grace_minutes", "Grace minutes", "number")}
+              {t("Five fields: minute hour day-of-month month day-of-week. Example: 0 9 * * * runs daily at 09:00.")}</p>
+            {input("grace_minutes", t("Grace minutes"), "number")}
             <Separator className="sm:col-span-2" />
-            <h3 className="font-medium sm:col-span-2">Alerts</h3>
-            {select("alert_channel", "Alert channel", ["telegram", "email"], { telegram: "Telegram", email: "Email" })}
-            {input("alert_target", "Alert target")}
+            <h3 className="font-medium sm:col-span-2">{t("Alerts")}</h3>
+            {select("alert_channel", t("Alert channel"), ["telegram", "email"], { telegram: "Telegram", email: "Email" })}
+            {input("alert_target", t("Alert target"))}
             <Separator className="sm:col-span-2" />
-            <h3 className="font-medium sm:col-span-2">Re-run</h3>
-            {input("rerun_webhook_url", "Re-run webhook URL", "url")}
+            <h3 className="font-medium sm:col-span-2">{t("Re-run")}</h3>
+            {input("rerun_webhook_url", t("Re-run webhook URL"), "url")}
             {input(
               "rerun_webhook_secret",
-              task ? "Webhook secret (blank = unchanged)" : "Webhook secret",
+              task ? t("Webhook secret (blank = unchanged)") : t("Webhook secret"),
               "password",
             )}
             <Separator className="sm:col-span-2" />
-            <h3 className="font-medium sm:col-span-2">Deliverable check</h3>
-            {select("deliverable_check", "Deliverable check", [
+            <h3 className="font-medium sm:col-span-2">{t("Deliverable check")}</h3>
+            {select("deliverable_check", t("Deliverable check"), [
               "none",
               "http",
               "github",
             ], { none: "None", http: "HTTP URL", github: "GitHub" })}
             {form.deliverable_check !== "none" && input(
               "deliverable_delay_minutes",
-              "Deliverable delay minutes",
+              t("Deliverable delay minutes"),
               "number",
             )}
           </div>
           {form.deliverable_check !== "none" && <div className="space-y-2">
-            <Label htmlFor="config">Deliverable config (JSON object)</Label>
+            <Label htmlFor="config">{t("Deliverable config (JSON object)")}</Label>
             <Textarea
               id="config"
               {...errorProps("deliverable_config")}
@@ -270,11 +269,11 @@ export function TaskForm({
                 checked={form.paused}
                 onCheckedChange={(v) => field("paused", v)}
               />
-              <Label htmlFor="paused">Paused</Label>
+              <Label htmlFor="paused">{t("Paused")}</Label>
             </div>
           )}
           <Button disabled={busy} type="submit">
-            {busy ? "Saving…" : "Save task"}
+            {busy ? t("Saving…") : t("Save task")}
           </Button>
         </form>
       </DialogContent>

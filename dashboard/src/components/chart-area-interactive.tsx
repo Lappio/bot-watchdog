@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
   ChartContainer,
@@ -30,24 +31,24 @@ export function ActivityChart({
   days?: string;
   onDays?: (v: string) => void;
 }) {
+  const { t, plural, formatDate, formatNumber } = useI18n();
   return (
     <Card>
-      <CardHeader className="flex flex-row items-center justify-between gap-4">
+      <CardHeader className="flex flex-row flex-wrap items-center justify-between gap-4">
         <div>
-          <CardTitle>Run activity</CardTitle>
+          <CardTitle>{t("Run activity")}</CardTitle>
           <CardDescription>
-            Daily heartbeats and incidents · UTC
-          </CardDescription>
+            {t("Daily heartbeats and incidents · UTC")}</CardDescription>
         </div>
         {onDays && (
           <Select value={days} onValueChange={onDays}>
-            <SelectTrigger className="w-32">
+            <SelectTrigger className="w-32" aria-label={t("Run activity")}>
               <SelectValue />
             </SelectTrigger>
             <SelectContent>
               {["7", "14", "30"].map((d) => (
                 <SelectItem key={d} value={d}>
-                  {d} days
+                  {plural("{count} day", "{count} days", Number(d))}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -58,19 +59,19 @@ export function ActivityChart({
         <ChartContainer
           className="h-64 w-full"
           config={{
-            ok: { label: "OK", color: "var(--chart-ok)" },
-            fail: { label: "Failed", color: "var(--chart-fail)" },
+            ok: { label: t("OK"), color: "var(--chart-ok)" },
+            fail: { label: t("Failed"), color: "var(--chart-fail)" },
             incidents_opened: {
-              label: "Incidents opened",
+              label: t("Incidents opened"),
               color: "var(--chart-incident)",
             },
           }}
         >
           <BarChart data={series}>
             <CartesianGrid vertical={false} />
-            <XAxis dataKey="date" tickFormatter={(v) => v.slice(5)} />
-            <YAxis allowDecimals={false} />
-            <ChartTooltip content={<ChartTooltipContent />} />
+            <XAxis dataKey="date" tickFormatter={(v) => formatDate(String(v))} />
+            <YAxis allowDecimals={false} tickFormatter={formatNumber} />
+            <ChartTooltip content={<ChartTooltipContent labelFormatter={(value) => formatDate(String(value))} />} />
             <ChartLegend content={<ChartLegendContent />} />
             {["ok", "fail", "incidents_opened"].map((key) => (
               <Bar

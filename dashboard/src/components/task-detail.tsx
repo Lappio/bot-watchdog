@@ -1,7 +1,8 @@
+import { useI18n } from "@/lib/i18n";
 import { useEffect, useMemo, useState } from "react";
 import type { Task, ScheduleItem, Heartbeat, Runs, Stats } from "@/lib/api";
 import { api } from "@/lib/api";
-import { message, taskStatus } from "@/lib/helpers";
+import { taskStatus } from "@/lib/helpers";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
@@ -33,15 +34,16 @@ export function TaskDetail({
   version: number;
   onChanged: () => void;
 }) {
+  const { t, label, plural, formatDateTime, formatError } = useI18n();
   const [runs, setRuns] = useState<Heartbeat[]>([]);
   const [incidents, setIncidents] = useState<Runs["incidents"]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   useEffect(() => {
     let active = true;
     setLoading(true);
-    setError("");
+    setError(null);
     api<Runs>(`/tasks/${task.id}/runs?limit=50`)
       .then((r) => {
         if (active) {
@@ -51,7 +53,7 @@ export function TaskDetail({
         }
       })
       .catch((e) => {
-        if (active) setError(message(e));
+        if (active) setError(e);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -62,7 +64,7 @@ export function TaskDetail({
   }, [task.id, version]);
   async function older() {
     setLoading(true);
-    setError("");
+    setError(null);
     try {
       const r = await api<Runs>(
         `/tasks/${task.id}/runs?limit=50&before=${encodeURIComponent(cursor!)}`,
@@ -71,7 +73,7 @@ export function TaskDetail({
       setIncidents((old) => [...new Map([...old, ...r.incidents].map((i) => [i.id, i])).values()]);
       setCursor(r.next_before);
     } catch (e) {
-      setError(message(e));
+      setError(e);
     } finally {
       setLoading(false);
     }
@@ -101,25 +103,25 @@ export function TaskDetail({
     <div className="space-y-6">
       <div className="flex flex-wrap items-center gap-3">
         <h1 className="text-2xl font-semibold tracking-tight">{task.name}</h1>
-        <Badge variant="outline">{task.bot ?? "No bot"}</Badge>
+        <Badge variant="outline">{task.bot ?? t("No bot")}</Badge>
         <Badge>
           {schedule
-            ? taskStatus(schedule)
+            ? label(taskStatus(schedule))
             : task.paused
-              ? "Paused"
+              ? t("Paused")
               : task.last_status === "fail"
-                ? "Failing"
-                : "Healthy"}
+                ? t("Failing")
+                : t("Healthy")}
         </Badge>
         <div className="ml-auto flex flex-wrap gap-2">
           {["Edit", task.paused ? "Resume" : "Pause", "Copy snippet"].map(
             (a) => (
               <Button
-                key={a}
+                key={label(a)}
                 variant="outline"
                 onClick={() => onAction(a, task.id)}
               >
-                {a}
+                {label(a)}
               </Button>
             ),
           )}
@@ -127,18 +129,17 @@ export function TaskDetail({
       </div>
       <Tabs defaultValue="runs">
         <TabsList>
-          <TabsTrigger value="runs">Runs</TabsTrigger>
-          <TabsTrigger value="incidents">Incidents</TabsTrigger>
-          <TabsTrigger value="config">Config</TabsTrigger>
+          <TabsTrigger value="runs">{t("Runs")}</TabsTrigger>
+          <TabsTrigger value="incidents">{t("Incidents")}</TabsTrigger>
+          <TabsTrigger value="config">{t("Config")}</TabsTrigger>
         </TabsList>
         <TabsContent value="runs" className="space-y-4">
-          {error && (
+          {!!error && (
             <Alert variant="destructive">
               <AlertDescription>
-                {error}
+                {formatError(error)}
                 <Button variant="link" onClick={onChanged}>
-                  Retry
-                </Button>
+                  {t("Retry")}</Button>
               </AlertDescription>
             </Alert>
           )}
@@ -154,7 +155,7 @@ export function TaskDetail({
                     "Output URL",
                     "Message",
                   ].map((h) => (
-                    <TableHead key={h}>{h}</TableHead>
+                    <TableHead key={h}>{label(h)}</TableHead>
                   ))}
                 </TableRow>
               </TableHeader>
@@ -162,7 +163,7 @@ export function TaskDetail({
                 {runs.map((r) => (
                   <TableRow key={r.id}>
                     <TableCell>
-                      {new Date(r.received_at).toLocaleString()}
+                      {formatDateTime(r.received_at)}
                     </TableCell>
                     <TableCell>
                       <Badge
@@ -170,11 +171,11 @@ export function TaskDetail({
                           r.status === "ok" ? "secondary" : "destructive"
                         }
                       >
-                        {r.status}
+                        {r.status === "ok" ? t("OK") : t("Failed")}
                       </Badge>
                     </TableCell>
                     <TableCell>{r.run_id ?? "—"}</TableCell>
-                    <TableCell className="max-w-64 truncate">
+                    <TableCell className="max-w-64 break-all whitespace-normal">
                       {r.output_url ?? "—"}
                     </TableCell>
                     <TableCell className="max-w-80 whitespace-normal">
@@ -185,8 +186,7 @@ export function TaskDetail({
                 {!runs.length && !loading && (
                   <TableRow>
                     <TableCell colSpan={5} className="h-24 text-center">
-                      No runs recorded yet.
-                    </TableCell>
+                      {t("No runs recorded yet.")}</TableCell>
                   </TableRow>
                 )}
               </TableBody>
@@ -198,12 +198,9 @@ export function TaskDetail({
             disabled={loading || !cursor}
             onClick={() => void older()}
           >
-            Load older
-          </Button>
+            {t("Load older")}</Button>
           <p className="text-xs text-muted-foreground">
-            History is retained for 90 days. Runs sharing a cursor timestamp may
-            be skipped at page boundaries.
-          </p>
+            {t("History is retained for 90 days. Runs sharing a cursor timestamp may be skipped at page boundaries.")}</p>
         </TabsContent>
         <TabsContent value="incidents">
           <Incidents
@@ -216,23 +213,23 @@ export function TaskDetail({
         <TabsContent value="config">
           <Card>
             <CardHeader>
-              <CardTitle>Task configuration</CardTitle>
+              <CardTitle>{t("Task configuration")}</CardTitle>
             </CardHeader>
             <CardContent>
               <dl className="grid gap-4 sm:grid-cols-2">
                 {Object.entries({
                   Schedule: `${task.schedule} · ${task.timezone}`,
-                  Grace: `${task.grace_minutes} minutes`,
-                  "Alert channel": task.alert_channel,
+                  Grace: plural("{count} minute", "{count} minutes", task.grace_minutes),
+                  "Alert channel": task.alert_channel === "email" ? t("Email") : t("Telegram"),
                   "Alert target": task.alert_target,
                   "Re-run webhook": task.has_rerun_webhook
-                    ? "Configured"
-                    : "None",
-                  "Deliverable check": task.deliverable_check,
-                  "Deliverable delay": `${task.deliverable_delay_minutes} minutes`,
+                    ? t("Configured")
+                    : t("None"),
+                  "Deliverable check": task.deliverable_check === "none" ? t("None") : task.deliverable_check === "http" ? t("HTTP URL") : t("GitHub"),
+                  "Deliverable delay": plural("{count} minute", "{count} minutes", task.deliverable_delay_minutes),
                 }).map(([k, v]) => (
                   <div key={k}>
-                    <dt className="text-sm text-muted-foreground">{k}</dt>
+                    <dt className="text-sm text-muted-foreground">{label(k)}</dt>
                     <dd className="break-words font-medium">{v}</dd>
                   </div>
                 ))}

@@ -1,3 +1,5 @@
+import { LanguageToggle } from "@/components/language-toggle";
+import { I18nProvider, useI18n } from "@/lib/i18n";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
 import { RefreshCw } from "lucide-react";
 import { toast } from "sonner";
@@ -9,7 +11,6 @@ import {
   type Stats,
   type Credentials,
 } from "@/lib/api";
-import { message } from "@/lib/helpers";
 import { AppSidebar } from "@/components/app-sidebar";
 import { LoginCard, ThemeProvider, ThemeToggle } from "@/components/auth";
 import { SectionCards } from "@/components/section-cards";
@@ -57,6 +58,7 @@ const TaskDetail = lazy(() => import("@/components/task-detail").then((m) => ({ 
 const Incidents = lazy(() => import("@/components/incidents").then((m) => ({ default: m.Incidents })));
 
 function Dashboard() {
+  const { t, formatError } = useI18n();
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY));
   const [authError, setAuthError] = useState("");
   const [path, setPath] = useState(() => location.hash.slice(1) || "/");
@@ -66,11 +68,13 @@ function Dashboard() {
   const [days, setDays] = useState("14");
   const [version, setVersion] = useState(0);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [editor, setEditor] = useState<Task | null | undefined>();
   const [credentials, setCredentials] = useState<Credentials>();
   const [deleting, setDeleting] = useState<Task>();
   const [deletingBusy, setDeletingBusy] = useState(false);
+  const [pausing, setPausing] = useState<Task>();
+  const [pausingBusy, setPausingBusy] = useState(false);
   const refresh = useCallback(() => setVersion((v) => v + 1), []);
   useEffect(() => {
     const hash = () => setPath(location.hash.slice(1) || "/");
@@ -80,6 +84,8 @@ function Dashboard() {
         "Your token was rejected or expired. Paste ADMIN_TOKEN to sign in again.",
       );
       setCredentials(undefined);
+      setPausing(undefined);
+      setDeleting(undefined);
       setEditor(undefined);
       setTasks([]);
       setSchedule([]);
@@ -96,7 +102,7 @@ function Dashboard() {
     if (!token) return;
     let active = true;
     setLoading(true);
-    setError("");
+    setError(null);
     Promise.all([
       api<{ tasks: Task[] }>("/tasks"),
       api<{ tasks: ScheduleItem[] }>("/schedule"),
@@ -110,7 +116,7 @@ function Dashboard() {
         }
       })
       .catch((e) => {
-        if (active) setError(message(e));
+        if (active) setError(e);
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -129,10 +135,10 @@ function Dashboard() {
       const text = await api<string>(`/tasks/${id}/snippet`, {}, true);
       await navigator.clipboard.writeText(text);
       toast.success(
-        "Snippet copied. Replace <YOUR_PING_TOKEN> before using it.",
+        t("Snippet copied. Replace <YOUR_PING_TOKEN> before using it."),
       );
     } catch (e) {
-      toast.error(message(e));
+      toast.error(formatError(e));
     }
   }
   const action = useCallback(
@@ -142,19 +148,20 @@ function Dashboard() {
       if (a === "View") location.hash = `/tasks/${id}`;
       else if (a === "Edit") setEditor(task);
       else if (a === "Delete") setDeleting(task);
+      else if (a === "Pause") setPausing(task);
       else if (a === "Copy snippet") void copySnippet(id);
       else
         void api(`/tasks/${id}`, {
           method: "PATCH",
-          body: JSON.stringify({ paused: a === "Pause" }),
+          body: JSON.stringify({ paused: false }),
         })
           .then(() => {
-            toast.success(a === "Pause" ? "Task paused" : "Task resumed");
+            toast.success(t("Task resumed"));
             refresh();
           })
-          .catch((e) => toast.error(message(e)));
+          .catch((e) => toast.error(formatError(e)));
     },
-    [tasks, refresh],
+    [tasks, refresh, t, formatError],
   );
   if (!token)
     return (
@@ -170,14 +177,14 @@ function Dashboard() {
   const detailId = path.startsWith("/tasks/") ? path.slice(7) : null;
   const task = tasks.find((t) => t.id === detailId);
   const title = detailId
-    ? task?.name ?? "Task"
+    ? task?.name ?? t("Task")
     : path === "/tasks"
-      ? "Tasks"
+      ? t("Tasks")
       : path === "/incidents"
-        ? "Incidents"
+        ? t("Incidents")
         : path === "/settings"
-          ? "Settings"
-          : "Overview";
+          ? t("Settings")
+          : t("Overview");
   return (
     <SidebarProvider>
       <AppSidebar
@@ -187,6 +194,8 @@ function Dashboard() {
           setToken(null);
           setAuthError("");
           setCredentials(undefined);
+          setPausing(undefined);
+          setDeleting(undefined);
           setEditor(undefined);
           setTasks([]);
           setSchedule([]);
@@ -204,7 +213,7 @@ function Dashboard() {
               </BreadcrumbItem>
               <BreadcrumbSeparator />
               {detailId && <>
-                <BreadcrumbItem><BreadcrumbLink href="#/tasks">Tasks</BreadcrumbLink></BreadcrumbItem>
+                <BreadcrumbItem><BreadcrumbLink href="#/tasks">{t("Tasks")}</BreadcrumbLink></BreadcrumbItem>
                 <BreadcrumbSeparator />
               </>}
               <BreadcrumbItem>
@@ -216,13 +225,13 @@ function Dashboard() {
             <Button
               variant="outline"
               size="icon"
-              aria-label="Refresh"
+              aria-label={t("Refresh")}
               disabled={loading}
               onClick={refresh}
             >
               <RefreshCw className={loading ? "animate-spin" : ""} />
             </Button>
-            <ThemeToggle />
+            <LanguageToggle /><ThemeToggle />
           </div>
         </header>
         <main className="mx-auto flex w-full max-w-[1600px] flex-col gap-6 p-4 lg:p-6">
@@ -230,11 +239,11 @@ function Dashboard() {
             <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
             <p className="mt-1 text-sm text-muted-foreground">
               {path === "/"
-                ? "Your bots, schedules, and delivery health at a glance. Auto-refreshes every 60 seconds."
+                ? t("Your bots, schedules, and delivery health at a glance. Auto-refreshes every 60 seconds.")
                 : path === "/tasks"
-                  ? "Manage schedules and heartbeat monitoring."
+                  ? t("Manage schedules and heartbeat monitoring.")
                   : path === "/incidents"
-                    ? "Investigate missed runs, failures, and missing deliverables."
+                    ? t("Investigate missed runs, failures, and missing deliverables.")
                     : ""}
             </p>
           </div>}
@@ -242,10 +251,9 @@ function Dashboard() {
           {error ? (
             <Alert variant="destructive">
               <AlertDescription>
-                {error}
+                {formatError(error)}
                 <Button variant="link" onClick={refresh}>
-                  Retry
-                </Button>
+                  {t("Retry")}</Button>
               </AlertDescription>
             </Alert>
           ) : loading && !stats ? (
@@ -267,7 +275,7 @@ function Dashboard() {
             ) : (
               <Alert>
                 <AlertDescription>
-                  Task not found. <a href="#/tasks">Back to tasks</a>
+                  {t("Task not found.")}{" "}<a href="#/tasks">{t("Back to tasks")}</a>
                 </AlertDescription>
               </Alert>
             )
@@ -276,14 +284,13 @@ function Dashboard() {
           ) : path === "/settings" ? (
             <Card>
               <CardHeader>
-                <CardTitle>Browser settings</CardTitle>
+                <CardTitle>{t("Browser settings")}</CardTitle>
               </CardHeader>
               <CardContent className="space-y-4">
                 <p className="text-sm text-muted-foreground">
-                  Choose a theme. Your preference is saved in this browser.
-                  Manage ADMIN_TOKEN through your Worker environment.
-                </p>
-                <ThemeToggle />
+                  {t("Choose your language and theme. Your preferences are saved in this browser. Manage ADMIN_TOKEN through your Worker environment.")}</p>
+                <div className="flex items-center justify-between gap-4"><span>{t("Language")}</span><LanguageToggle /></div>
+                <div className="flex items-center justify-between gap-4"><span>{t("Theme")}</span><ThemeToggle /></div>
               </CardContent>
             </Card>
           ) : (
@@ -317,7 +324,7 @@ function Dashboard() {
           onSaved={(c) => {
             setEditor(undefined);
             if (c) setCredentials(c);
-            toast.success("Task saved");
+            toast.success(t("Task saved"));
             refresh();
           }}
         />
@@ -331,11 +338,9 @@ function Dashboard() {
       >
         <DialogContent className="max-h-[90svh] overflow-auto sm:max-w-2xl">
           <DialogHeader>
-            <DialogTitle>Connect your task</DialogTitle>
+            <DialogTitle>{t("Connect your task")}</DialogTitle>
             <DialogDescription>
-              The ping token is shown once. Save this snippet and heartbeat URL
-              before closing.
-            </DialogDescription>
+              {t("The ping token is shown once. Save this snippet and heartbeat URL before closing.")}</DialogDescription>
           </DialogHeader>
           <p className="break-all font-mono text-xs">
             {credentials?.heartbeat_url}
@@ -347,18 +352,42 @@ function Dashboard() {
             onClick={() => {
               void navigator.clipboard
                 .writeText(credentials!.snippet)
-                .then(() => toast.success("Snippet copied"))
+                .then(() => toast.success(t("Snippet copied")))
                 .catch(() =>
                   toast.error(
-                    "Clipboard unavailable. Select and copy the snippet.",
+                    t("Clipboard unavailable. Select and copy the snippet."),
                   ),
                 );
             }}
           >
-            Copy snippet
-          </Button>
+            {t("Copy snippet")}</Button>
         </DialogContent>
       </Dialog>
+      <AlertDialog open={!!pausing} onOpenChange={(open) => {
+        if (!open && !pausingBusy) setPausing(undefined);
+      }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("Pause {name}?", { name: pausing?.name ?? "" })}</AlertDialogTitle>
+            <AlertDialogDescription>{t("Paused tasks do not trigger missed-run alerts. You can resume monitoring at any time.")}</AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={pausingBusy}>{t("Cancel")}</AlertDialogCancel>
+            <AlertDialogAction disabled={pausingBusy} onClick={(event) => {
+              event.preventDefault();
+              setPausingBusy(true);
+              void api(`/tasks/${pausing!.id}`, { method: "PATCH", body: JSON.stringify({ paused: true }) })
+                .then(() => {
+                  setPausing(undefined);
+                  toast.success(t("Task paused"));
+                  refresh();
+                })
+                .catch((error) => toast.error(formatError(error)))
+                .finally(() => setPausingBusy(false));
+            }}>{t("Confirm pause")}</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
       <AlertDialog
         open={!!deleting}
         onOpenChange={(v) => {
@@ -367,16 +396,13 @@ function Dashboard() {
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Delete {deleting?.name}?</AlertDialogTitle>
+            <AlertDialogTitle>{t("Delete {name}?", { name: deleting?.name ?? "" })}</AlertDialogTitle>
             <AlertDialogDescription>
-              This permanently deletes the task and its heartbeats and
-              incidents.
-            </AlertDialogDescription>
+              {t("This permanently deletes the task and its heartbeats and incidents.")}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={deletingBusy}>
-              Cancel
-            </AlertDialogCancel>
+              {t("Cancel")}</AlertDialogCancel>
             <AlertDialogAction
               disabled={deletingBusy}
               onClick={(e) => {
@@ -385,16 +411,15 @@ function Dashboard() {
                 void api(`/tasks/${deleting!.id}`, { method: "DELETE" })
                   .then(() => {
                     setDeleting(undefined);
-                    toast.success("Task deleted");
+                    toast.success(t("Task deleted"));
                     if (detailId === deleting?.id) location.hash = "/tasks";
                     refresh();
                   })
-                  .catch((e) => toast.error(message(e)))
+                  .catch((e) => toast.error(formatError(e)))
                   .finally(() => setDeletingBusy(false));
               }}
             >
-              Delete task
-            </AlertDialogAction>
+              {t("Delete task")}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -403,11 +428,11 @@ function Dashboard() {
 }
 export default function App() {
   return (
-    <ThemeProvider>
+    <I18nProvider><ThemeProvider>
       <TooltipProvider>
         <Dashboard />
         <Toaster />
       </TooltipProvider>
-    </ThemeProvider>
+    </ThemeProvider></I18nProvider>
   );
 }

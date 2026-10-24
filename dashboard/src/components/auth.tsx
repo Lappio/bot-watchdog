@@ -1,3 +1,5 @@
+import { LanguageToggle } from "./language-toggle";
+import { useI18n } from "@/lib/i18n";
 import { useState } from "react";
 import { ThemeProvider as Provider, useTheme } from "next-themes";
 import { Moon, Sun, Monitor } from "lucide-react";
@@ -31,11 +33,12 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   );
 }
 export function ThemeToggle() {
+  const { t, label } = useI18n();
   const { setTheme } = useTheme();
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button variant="outline" size="icon" aria-label="Choose theme">
+        <Button variant="outline" size="icon" aria-label={t("Choose theme")}>
           <Sun className="dark:hidden" />
           <Moon className="hidden dark:block" />
         </Button>
@@ -47,11 +50,11 @@ export function ThemeToggle() {
           ["system", Monitor],
         ].map(([name, Icon]) => (
           <DropdownMenuItem
-            key={String(name)}
+            key={label(String(name))}
             onClick={() => setTheme(String(name))}
           >
             <Icon />
-            {String(name)}
+            {label(String(name))}
           </DropdownMenuItem>
         ))}
       </DropdownMenuContent>
@@ -65,15 +68,16 @@ export function LoginCard({
   onLogin: (token: string) => void;
   error?: string;
 }) {
+  const { t, label } = useI18n();
   const [token, setToken] = useState("");
   return (
     <main className="grid min-h-svh place-items-center bg-muted/40 p-4">
-      <Card className="w-full max-w-md">
+      <Card className="relative w-full max-w-md pt-14">
+        <div className="absolute right-4 top-4"><LanguageToggle /></div>
         <CardHeader>
           <CardTitle className="text-2xl">bot-watchdog</CardTitle>
           <CardDescription>
-            Sign in to monitor your scheduled bots.
-          </CardDescription>
+            {t("Sign in to monitor your scheduled bots.")}</CardDescription>
         </CardHeader>
         <CardContent>
           <form
@@ -85,11 +89,11 @@ export function LoginCard({
           >
             {error && (
               <Alert variant="destructive">
-                <AlertDescription>{error}</AlertDescription>
+                <AlertDescription>{label(error)}</AlertDescription>
               </Alert>
             )}
             <div className="space-y-2">
-              <Label htmlFor="token">Paste ADMIN_TOKEN</Label>
+              <Label htmlFor="token">{t("Paste ADMIN_TOKEN")}</Label>
               <Input
                 id="token"
                 type="password"
@@ -100,11 +104,9 @@ export function LoginCard({
               />
             </div>
             <Button className="w-full" type="submit">
-              Sign in
-            </Button>
+              {t("Sign in")}</Button>
             <p className="text-xs text-muted-foreground">
-              Your token is stored in this browser and sent with API requests.
-            </p>
+              {t("Your token is stored in this browser and sent with API requests.")}</p>
           </form>
         </CardContent>
       </Card>

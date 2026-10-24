@@ -1,8 +1,9 @@
+import { useI18n } from "@/lib/i18n";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, type Incident, type Task } from "@/lib/api";
-import { humanizeIncident, incidentVariant, incidentClassName, message } from "@/lib/helpers";
+import { humanizeIncident, incidentVariant, incidentClassName } from "@/lib/helpers";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -37,14 +38,15 @@ export function Incidents({
   version: number;
   onChanged: () => void;
 }) {
+  const { t, label, locale, formatDateTime, formatError } = useI18n();
   const [status, setStatus] = useState(taskId ? "all" : "open");
   const [rows, setRows] = useState<Incident[]>();
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>(null);
   const [confirm, setConfirm] = useState<Incident | null>(null);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     let active = true;
-    setError("");
+    setError(null);
     setRows(undefined);
     api<{ incidents: Incident[] }>(
       `/incidents?status=${status}&limit=500${taskId ? `&task_id=${encodeURIComponent(taskId)}` : ""}`,
@@ -53,7 +55,7 @@ export function Incidents({
         if (active) setRows(r.incidents);
       })
       .catch((e) => {
-        if (active) setError(message(e));
+        if (active) setError(e);
       });
     return () => {
       active = false;
@@ -67,9 +69,9 @@ export function Incidents({
         `/incidents/${confirm.id}/rerun`,
         { method: "POST" },
       );
-      toast.success(`Re-run: ${humanizeIncident(r.status)}`);
+      toast.success(t("Re-run: {status}", { status: humanizeIncident(r.status, locale) }));
     } catch (e) {
-      toast.error(message(e));
+      toast.error(formatError(e));
     } finally {
       setBusy(false);
       setConfirm(null);
@@ -81,10 +83,9 @@ export function Incidents({
       {error ? (
         <Alert variant="destructive">
           <AlertDescription>
-            {error}
+            {formatError(error)}
             <Button variant="link" onClick={onChanged}>
-              Retry
-            </Button>
+              {t("Retry")}</Button>
           </AlertDescription>
         </Alert>
       ) : !rows ? (
@@ -105,7 +106,7 @@ export function Incidents({
                   "Resolution",
                   "",
                 ].map((h, i) => (
-                  <TableHead key={i}>{h}</TableHead>
+                  <TableHead key={i}>{label(h)}</TableHead>
                 ))}
               </TableRow>
             </TableHeader>
@@ -128,21 +129,21 @@ export function Incidents({
                       "—"}
                   </TableCell>
                   <TableCell>
-                    <Badge variant={incidentVariant(i.kind)} className={incidentClassName(i.kind)}>{humanizeIncident(i.kind)}</Badge>
+                    <Badge variant={incidentVariant(i.kind)} className={incidentClassName(i.kind)}>{humanizeIncident(i.kind, locale)}</Badge>
                   </TableCell>
                   <TableCell>
-                    {new Date(i.expected_at).toLocaleString()}
+                    {formatDateTime(i.expected_at)}
                   </TableCell>
                   <TableCell>
-                    {new Date(i.opened_at).toLocaleString()}
+                    {formatDateTime(i.opened_at)}
                   </TableCell>
-                  <TableCell title={i.alert_error ?? undefined}>
-                    {humanizeIncident(i.alert_status)}
+                  <TableCell>
+                    {i.alert_error ? <Tooltip><TooltipTrigger asChild><span tabIndex={0}>{humanizeIncident(i.alert_status, locale)}</span></TooltipTrigger><TooltipContent>{t("Alert error: {error}", { error: i.alert_error })}</TooltipContent></Tooltip> : humanizeIncident(i.alert_status, locale)}
                   </TableCell>
-                  <TableCell title={i.rerun_error ?? undefined}>
-                    <Badge variant={incidentVariant(i.rerun_status)} className={incidentClassName(i.rerun_status)}>{humanizeIncident(i.rerun_status)}</Badge>
+                  <TableCell>
+                    {i.rerun_error ? <Tooltip><TooltipTrigger asChild><span tabIndex={0}><Badge variant={incidentVariant(i.rerun_status)} className={incidentClassName(i.rerun_status)}>{humanizeIncident(i.rerun_status, locale)}</Badge></span></TooltipTrigger><TooltipContent>{t("Re-run error: {error}", { error: i.rerun_error })}</TooltipContent></Tooltip> : <Badge variant={incidentVariant(i.rerun_status)} className={incidentClassName(i.rerun_status)}>{humanizeIncident(i.rerun_status, locale)}</Badge>}
                   </TableCell>
-                  <TableCell><Badge variant={incidentVariant(i.resolution)}>{humanizeIncident(i.resolution)}</Badge></TableCell>
+                  <TableCell><Badge variant={incidentVariant(i.resolution)}>{humanizeIncident(i.resolution, locale)}</Badge></TableCell>
                   <TableCell>
                     <Tooltip>
                       <TooltipTrigger asChild>
@@ -161,11 +162,10 @@ export function Incidents({
                       }
                       onClick={() => setConfirm(i)}
                     >
-                      Re-run
-                    </Button>
+                      {t("Re-run")}</Button>
                         </span>
                       </TooltipTrigger>
-                      {!tasks.find((t) => t.id === i.task_id)?.has_rerun_webhook && <TooltipContent>No re-run webhook configured</TooltipContent>}
+                      {!tasks.find((t) => t.id === i.task_id)?.has_rerun_webhook && <TooltipContent>{t("No re-run webhook configured")}</TooltipContent>}
                     </Tooltip>
                   </TableCell>
                 </TableRow>
@@ -176,8 +176,7 @@ export function Incidents({
                     colSpan={9}
                     className="h-32 text-center text-muted-foreground"
                   >
-                    No incidents.
-                  </TableCell>
+                    {t("No incidents.")}</TableCell>
                 </TableRow>
               )}
             </TableBody>
@@ -190,8 +189,8 @@ export function Incidents({
     <>
       <Tabs value={status} onValueChange={setStatus}>
         <TabsList>
-          <TabsTrigger value="open">Open</TabsTrigger>
-          <TabsTrigger value="all">All</TabsTrigger>
+          <TabsTrigger value="open">{t("Open")}</TabsTrigger>
+          <TabsTrigger value="all">{t("All")}</TabsTrigger>
         </TabsList>
         <TabsContent value={status}>{content}</TabsContent>
       </Tabs>
@@ -203,13 +202,12 @@ export function Incidents({
       >
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Re-run this task?</AlertDialogTitle>
+            <AlertDialogTitle>{t("Re-run this task?")}</AlertDialogTitle>
             <AlertDialogDescription>
-              This will POST the task's webhook once. It will never auto-retry.
-            </AlertDialogDescription>
+              {t("This will POST the task's webhook once. It will never auto-retry.")}</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
-            <AlertDialogCancel disabled={busy}>Cancel</AlertDialogCancel>
+            <AlertDialogCancel disabled={busy}>{t("Cancel")}</AlertDialogCancel>
             <AlertDialogAction
               disabled={busy}
               onClick={(e) => {
@@ -217,7 +215,7 @@ export function Incidents({
                 void rerun();
               }}
             >
-              {busy ? "Requesting…" : "Confirm re-run"}
+              {busy ? t("Requesting…") : t("Confirm re-run")}
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

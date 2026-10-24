@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import { useMemo, useState } from "react";
 import {
   flexRender,
@@ -11,7 +12,7 @@ import {
 } from "@tanstack/react-table";
 import { MoreHorizontal, ArrowUpDown, Plus } from "lucide-react";
 import type { ScheduleItem } from "@/lib/api";
-import { relative, taskStatus } from "@/lib/helpers";
+import { taskStatus } from "@/lib/helpers";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -50,6 +51,7 @@ export function DataTable({
   onAction: (action: string, id: string) => void;
   onNew: () => void;
 }) {
+  const { t, label, plural, formatRelative, formatDateTime, formatNumber } = useI18n();
   const [sorting, setSorting] = useState<SortingState>([]);
   const [filter, setFilter] = useState("");
   const [status, setStatus] = useState("All");
@@ -61,7 +63,7 @@ export function DataTable({
     () => [
       {
         accessorKey: "name",
-        header: "Name",
+        header: t("Name"),
         cell: ({ row }) => (
           <a
             className="font-medium hover:underline"
@@ -73,12 +75,12 @@ export function DataTable({
       },
       {
         accessorKey: "bot",
-        header: "Bot",
+        header: t("Bot"),
         cell: ({ getValue }) => String(getValue() ?? "—"),
       },
       {
         accessorKey: "schedule",
-        header: "Schedule",
+        header: t("Schedule"),
         cell: ({ row }) => (
           <span className="font-mono text-xs">
             {row.original.schedule}
@@ -90,31 +92,31 @@ export function DataTable({
       },
       {
         accessorKey: "next_run",
-        header: "Next run",
+        header: t("Next run"),
         cell: ({ getValue }) => (
           <Tooltip>
             <TooltipTrigger asChild>
-              <span tabIndex={0}>{relative(getValue() as string | null)}</span>
+              <span tabIndex={0}>{formatRelative(getValue() as string | null)}</span>
             </TooltipTrigger>
             <TooltipContent>
-              {String(getValue() ?? "No next occurrence")}
+              {getValue() ? formatDateTime(String(getValue())) : t("No next occurrence")}
             </TooltipContent>
           </Tooltip>
         ),
       },
       {
         accessorKey: "last_heartbeat_at",
-        header: "Last heartbeat",
+        header: t("Last heartbeat"),
         cell: ({ getValue }) => (
-          <span title={String(getValue() ?? "")}>
-            {relative(getValue() as string | null)}
+          <span title={getValue() ? formatDateTime(String(getValue())) : undefined}>
+            {formatRelative(getValue() as string | null)}
           </span>
         ),
       },
       {
         id: "status",
         accessorFn: taskStatus,
-        header: "Status",
+        header: t("Status"),
         cell: ({ getValue }) => (
           <Badge
             variant={
@@ -125,14 +127,15 @@ export function DataTable({
                   : "destructive"
             }
           >
-            {String(getValue())}
+            {label(String(getValue()))}
           </Badge>
         ),
       },
       {
         id: "incidents",
         accessorFn: (t) => t.open_incidents.length,
-        header: "Open incidents",
+        cell: ({ getValue }) => formatNumber(Number(getValue())),
+        header: t("Open incidents"),
       },
       {
         id: "actions",
@@ -143,7 +146,7 @@ export function DataTable({
               <Button
                 variant="ghost"
                 size="icon"
-                aria-label={`Actions for ${row.original.name}`}
+                aria-label={t("Actions for {name}", { name: row.original.name })}
               >
                 <MoreHorizontal />
               </Button>
@@ -157,10 +160,10 @@ export function DataTable({
                 "Delete",
               ].map((a) => (
                 <DropdownMenuItem
-                  key={a}
+                  key={label(a)}
                   onClick={() => onAction(a, row.original.id)}
                 >
-                  {a}
+                  {label(a)}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>
@@ -168,7 +171,7 @@ export function DataTable({
         ),
       },
     ],
-    [onAction],
+    [onAction, t, label, formatRelative, formatDateTime, formatNumber],
   );
   const table = useReactTable({
     data,
@@ -186,9 +189,9 @@ export function DataTable({
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-3">
         <Input
-          aria-label="Filter tasks"
+          aria-label={t("Filter tasks")}
           className="max-w-xs"
-          placeholder="Filter tasks…"
+          placeholder={t("Filter tasks…")}
           value={filter}
           onChange={(e) => setFilter(e.target.value)}
         />
@@ -200,7 +203,7 @@ export function DataTable({
           }}
         >
           <SelectTrigger className="w-44">
-            <SelectValue />
+            <SelectValue>{label(status)}</SelectValue>
           </SelectTrigger>
           <SelectContent>
             {[
@@ -212,15 +215,14 @@ export function DataTable({
               "Deliverable missing",
             ].map((s) => (
               <SelectItem key={s} value={s}>
-                {s}
+                {label(s)}
               </SelectItem>
             ))}
           </SelectContent>
         </Select>
         <Button className="ml-auto" onClick={onNew}>
           <Plus />
-          New task
-        </Button>
+          {t("New task")}</Button>
       </div>
       <div className="overflow-x-auto rounded-xl border">
         <Table>
@@ -263,10 +265,9 @@ export function DataTable({
             {!table.getRowModel().rows.length && (
               <TableRow>
                 <TableCell colSpan={8} className="h-32 text-center">
-                  {tasks.length ? "No matching tasks." : "No tasks yet."}{" "}
+                  {tasks.length ? t("No matching tasks.") : t("No tasks yet.")}{" "}
                   <Button variant="link" onClick={onNew}>
-                    Create a task
-                  </Button>
+                    {t("Create a task")}</Button>
                 </TableCell>
               </TableRow>
             )}
@@ -275,9 +276,7 @@ export function DataTable({
       </div>
       <div className="flex items-center justify-between text-sm text-muted-foreground">
         <span>
-          {table.getFilteredRowModel().rows.length} tasks · Page{" "}
-          {table.getState().pagination.pageIndex + 1} of{" "}
-          {Math.max(1, table.getPageCount())}
+          {plural("{count} task · Page {page} of {pages}", "{count} tasks · Page {page} of {pages}", table.getFilteredRowModel().rows.length, { page: formatNumber(table.getState().pagination.pageIndex + 1), pages: formatNumber(Math.max(1, table.getPageCount())) })}
         </span>
         <div className="flex gap-2">
           <Button
@@ -286,16 +285,14 @@ export function DataTable({
             disabled={!table.getCanPreviousPage()}
             onClick={() => table.previousPage()}
           >
-            Previous
-          </Button>
+            {t("Previous")}</Button>
           <Button
             variant="outline"
             size="sm"
             disabled={!table.getCanNextPage()}
             onClick={() => table.nextPage()}
           >
-            Next
-          </Button>
+            {t("Next")}</Button>
         </div>
       </div>
     </div>

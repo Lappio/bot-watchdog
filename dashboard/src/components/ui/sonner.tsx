@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import { useTheme } from "next-themes";
 import { Toaster as Sonner, type ToasterProps } from "sonner";
 import {
@@ -9,10 +10,12 @@ import {
 } from "lucide-react";
 
 const Toaster = ({ ...props }: ToasterProps) => {
+  const { t } = useI18n();
   const { theme = "system" } = useTheme();
 
   return (
     <Sonner
+      containerAriaLabel={t("Notifications")}
       theme={theme as ToasterProps["theme"]}
       className="toaster group"
       icons={{

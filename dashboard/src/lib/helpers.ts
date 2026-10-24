@@ -1,3 +1,5 @@
+import { en, type TranslationKey } from "./i18n/en";
+import zhCN from "./i18n/zh-CN";
 import type { ScheduleItem } from "./api";
 export function taskStatus(
   task: Pick<ScheduleItem, "paused" | "last_status" | "open_incidents">,
@@ -42,8 +44,8 @@ export function saneCron(value: string) {
     )
   );
 }
-export function relative(value: string | null) {
-  if (!value) return "Never";
+export function relative(value: string | null, locale: "en" | "zh-CN" = "en") {
+  if (!value) return locale === "zh-CN" ? zhCN.Never : en.Never;
   const seconds = (Date.parse(value) - Date.now()) / 1000;
   const unit =
     Math.abs(seconds) < 3600
@@ -51,7 +53,7 @@ export function relative(value: string | null) {
       : Math.abs(seconds) < 86400
         ? "hour"
         : "day";
-  return new Intl.RelativeTimeFormat(undefined, { numeric: "auto" }).format(
+  return new Intl.RelativeTimeFormat(locale, { numeric: "auto" }).format(
     Math.round(seconds / { minute: 60, hour: 3600, day: 86400 }[unit]),
     unit,
   );
@@ -59,13 +61,14 @@ export function relative(value: string | null) {
 export const message = (e: unknown) =>
   e instanceof Error ? e.message : "Something went wrong";
 
-export function humanizeIncident(value: string | null) {
-  if (value === null) return "Open";
+export function humanizeIncident(value: string | null, locale: "en" | "zh-CN" = "en") {
+  if (value === null) return locale === "zh-CN" ? zhCN.Open : en.Open;
   const labels: Record<string, string> = {
     rerun_ok: "Re-run OK",
     deliverable_ok: "Deliverable OK",
   };
-  return labels[value] ?? value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+  const key = labels[value] ?? value.replaceAll("_", " ").replace(/^./, (c) => c.toUpperCase());
+  return locale === "zh-CN" && Object.hasOwn(en, key) ? zhCN[key as TranslationKey] : key;
 }
 export function incidentVariant(value: string | null) {
   return value === "failed" || value === "missed"

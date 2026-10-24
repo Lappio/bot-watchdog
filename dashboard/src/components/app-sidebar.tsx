@@ -1,3 +1,4 @@
+import { useI18n } from "@/lib/i18n";
 import {
   Activity,
   LayoutDashboard,
@@ -23,6 +24,7 @@ export function AppSidebar({
   path: string;
   logout: () => void;
 }) {
+  const { t, label: translateLabel } = useI18n();
   return (
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
@@ -50,7 +52,7 @@ export function AppSidebar({
                 <SidebarMenuButton asChild isActive={path === url}>
                   <a href={`#${url}`}>
                     <Icon />
-                    <span>{String(label)}</span>
+                    <span>{translateLabel(String(label))}</span>
                   </a>
                 </SidebarMenuButton>
               </SidebarMenuItem>
@@ -63,7 +65,7 @@ export function AppSidebar({
           <SidebarMenuItem>
             <SidebarMenuButton onClick={logout}>
               <LogOut />
-              <span>Log out</span>
+              <span>{t("Log out")}</span>
             </SidebarMenuButton>
           </SidebarMenuItem>
         </SidebarMenu>

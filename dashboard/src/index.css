@@ -134,3 +134,26 @@
     @apply font-sans;
   }
 }
+
+html[lang="zh-CN"] {
+  font-family: "Geist Variable", system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans SC", "Noto Sans CJK SC", sans-serif;
+  line-height: 1.65;
+}
+html[lang="zh-CN"] body { font-family: inherit; }
+html[lang="zh-CN"] * { letter-spacing: normal; text-transform: none; }
+[data-slot="button"], [data-slot="badge"], [data-slot="table-head"],
+[data-slot="sidebar-menu-button"] { white-space: nowrap; }
+header > [data-slot="breadcrumb"] { min-width: 0; }
+header > [data-slot="breadcrumb"] ol { flex-wrap: nowrap; }
+header > [data-slot="breadcrumb"] [data-slot="breadcrumb-page"] { overflow-wrap: anywhere; }
+header > .ml-auto { flex-shrink: 0; }
+[data-slot="dialog-content"], [data-slot="alert-dialog-content"] { overflow-wrap: anywhere; }
+[data-slot="dialog-content"] form .grid > * { min-width: 0; }
+[data-slot="chart"] { min-width: 0; }
+@media (max-width: 480px) {
+  header [data-slot="breadcrumb-item"]:first-child,
+  header [data-slot="breadcrumb-separator"]:nth-child(2) { display: none; }
+}
+
+[data-slot="card-header"] > div { min-width: 0; }
+[data-slot="card-description"] { overflow-wrap: anywhere; }
