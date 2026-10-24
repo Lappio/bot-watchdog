@@ -316,3 +316,20 @@ These are planned, not implemented:
 bot-watchdog 是运行在 Cloudflare Workers + D1 上的外部定时任务看门狗，适用于 Grok Bot 等托管智能体平台。平台暂停或限流时，它仍能独立监控。任务完成后发送心跳；超过 cron 时间和宽限期未收到心跳，或任务报告失败时，通过 Telegram 或邮件告警。可配置重新运行的 webhook，但必须手动确认，绝不自动重跑。当前为单租户版本。
 
 快速开始：安装 Node 22，运行 `npm install`，复制 `cp .dev.vars.example .dev.vars` 并填写管理令牌及告警渠道密钥，然后运行 `npm run db:migrate:local` 和 `npx wrangler dev --local --test-scheduled`。按上方 curl 示例创建任务，将返回的 `snippet` 粘贴到机器人的任务指令中。用 `curl 'http://localhost:8787/__scheduled?cron=*+*+*+*+*'` 手动触发本地扫描，再通过管理 API 查看事件。生产环境需自行创建 D1 数据库、填写数据库 ID、配置公开 URL 和密钥、应用远程迁移并部署。
+
+## Phase 2: history and schedule views
+
+After applying migration `0006_history_schedule.sql`, use your `Authorization: Bearer <ADMIN_TOKEN>`
+header to access `/admin/schedule` and `/admin/tasks/:id/history`. The schedule includes paused tasks,
+next scheduled runs and open incidents; task history shows the last 100 heartbeats and open/recent incidents.
+These pages use bearer headers, with no cookie login.
+
+JSON clients can use `GET /api/schedule` and `GET /api/tasks/:id/runs?limit=50&before=<ISO>`.
+Run pages return `runs`, `incidents` in the page's time window, and `next_before`; pass that timestamp
+as `before` for the next page (limit 1–200). Timestamp-only pagination may skip runs sharing the
+boundary timestamp. A null cursor means the page is empty.
+
+Every scan prunes heartbeats and scan events older than 90 days, plus incidents resolved more than
+90 days ago. Unresolved incidents are retained. Scanner events record missed openings, successful
+reminders, rerun unknown transitions and per-task errors on a best-effort basis. Deliverable checks
+will be added in the next unit.

@@ -4,6 +4,8 @@ import { previousOccurrence } from './cron';
 import { notifyIncidentOpened, notifyMissedReminder, notifyRerunUnknown } from './alerts';
 import { pingToken, randomId, sha256 } from './security';
 
+import { recordScanEvent, pruneHistory } from './history';
+
 export const RERUN_RESULT_TIMEOUT_MINUTES = 5;
 
 export async function runScan(env: Env, now: Date): Promise<{ checked: number; opened: number; errors: number }> {
@@ -17,10 +19,12 @@ export async function runScan(env: Env, now: Date): Promise<{ checked: number; o
         const claimed = await env.DB.prepare("UPDATE incidents SET rerun_status = 'unknown' WHERE id = ? AND resolved_at IS NULL AND rerun_status = 'requested' AND rerun_requested_at < ? AND rerun_response_code IS NULL AND rerun_error IS NULL")
           .bind(incident.id, cutoff).run();
         if (claimed.meta.changes !== 1) continue;
+        await recordScanEvent(env, now, incident.task_id, 'rerun_unknown', incident.id);
         const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(incident.task_id).first<Task>();
         if (task) await notifyRerunUnknown(env, task, incident);
       } catch (error) {
         summary.errors++;
+        await recordScanEvent(env, now, incident.task_id, 'scan_error', incident.id, error instanceof Error ? error.message : 'Unknown error');
         console.error('Rerun timeout incident failed', incident.id, error instanceof Error ? error.message : 'Unknown error');
       }
     }
@@ -54,6 +58,7 @@ export async function runScan(env: Env, now: Date): Promise<{ checked: number; o
             try {
               const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ? AND resolved_at IS NULL').bind(open.id).first<Incident>();
               if (current && await notifyMissedReminder(env, task, current)) {
+                await recordScanEvent(env, now, task.id, 'scan_reminder', open.id);
                 await env.DB.prepare('UPDATE incidents SET last_reminder_at = ? WHERE id = ? AND resolved_at IS NULL AND last_reminder_at IS ? AND reminder_claim_until = ?')
                   .bind(now.toISOString(), open.id, open.last_reminder_at, leaseUntil).run();
               }
@@ -71,12 +76,18 @@ export async function runScan(env: Env, now: Date): Promise<{ checked: number; o
         .bind(id, task.id, expected, now.toISOString(), await sha256(token), task.id, anchor).run();
       if (inserted.meta.changes !== 1) continue;
       summary.opened++;
+      await recordScanEvent(env, now, task.id, 'scan_opened_missed', id);
       const incident = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(id).first<Incident>();
       if (incident) await notifyIncidentOpened(env, task, incident, token);
     } catch (error) {
       summary.errors++;
+      await recordScanEvent(env, now, task.id, 'scan_error', null, error instanceof Error ? error.message : 'Unknown error');
       console.error('Scan task failed', task.id, error instanceof Error ? error.message : 'Unknown error');
     }
+  }
+  try { await pruneHistory(env, now); } catch (error) {
+    summary.errors++;
+    console.error('History prune failed', error instanceof Error ? error.message : 'Unknown error');
   }
   return summary;
 }

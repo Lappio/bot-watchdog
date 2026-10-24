@@ -146,3 +146,43 @@ Include task name, schedule, and grace in the snippet header.
   rerun GET doesn't trigger, POST triggers exactly once, concurrent/double POST -> one webhook call, bad token -> 403/404.
 - Scripts in package.json: `dev` (wrangler dev), `test` (vitest run), `typecheck` (tsc --noEmit),
   `db:migrate:local` (wrangler d1 migrations apply DB --local).
+
+## Phase 2: history and cross-bot schedules
+Migration `0006_history_schedule.sql` adds only `scan_events`: id (text primary key), task_id
+(nullable FK to tasks, cascade delete), at (required UTC ISO timestamp), kind, ref_id and detail
+(nullable text). Allowed kinds: scan_opened_missed, scan_reminder, scan_error,
+scan_deliverable_failed, scan_deliverable_passed, rerun_unknown. Indexes cover (task_id, at) and at.
+The scanner records missed-incident openings, successful reminder sends, rerun transitions to unknown,
+and per-task errors. Inserts are best effort: a logging failure never interrupts scanning.
+Deliverable event kinds are reserved for a later unit; deliverable checks are not implemented here.
+
+`HISTORY_RETENTION_DAYS = 90` is exported from `src/history.ts`. At the end of every scan,
+including scans with all tasks paused, delete heartbeats with received_at strictly before now minus
+90 days, scan_events with at before that cutoff, and incidents with non-null resolved_at before
+that cutoff. Preserve unresolved incidents regardless of age, and preserve rows exactly at the cutoff.
+Task last-heartbeat summaries remain available after old heartbeat rows are pruned.
+
+All four endpoints below require the existing admin bearer token (no cookies):
+- `GET /api/tasks/:id/runs?limit=50&before=<ISO>` returns `{ runs, next_before, incidents }`.
+  Runs are ordered by received_at DESC, id DESC. Limit defaults to 50 and is clamped to 1..200.
+  A before cursor restricts received_at strictly below that timestamp; next_before is the oldest
+  timestamp in the page, or null on an empty page. Equal timestamps can therefore be skipped at
+  page boundaries. Incidents belong to the same task and have opened_at or expected_at within
+  the inclusive oldest-to-newest run time window; empty pages return no incidents. Unknown tasks
+  return 404; invalid before timestamps return 400.
+- `GET /api/schedule` returns `{ tasks }` for every task, including paused ones. Fields: id, name,
+  schedule, timezone, grace_minutes, paused (boolean), last_heartbeat_at, last_status,
+  schedule_anchor_at, created_at, next_run, open_incidents. Compute next_run with nextOccurrence
+  in the task timezone at request time, even while paused; null means no evaluable occurrence.
+  Each open incident includes id, kind, expected_at, opened_at, alert_status. Sort next_run ascending,
+  nulls last, then name. No alert targets or webhook credentials are exposed.
+- `GET /admin/schedule` renders a self-contained read-only HTML table of names, schedules/timezones,
+  next runs, last heartbeats/statuses, pause state, open incident summaries and task-history links.
+- `GET /admin/tasks/:id/history` renders the task header, last 100 heartbeats ordered by
+  received_at DESC, id DESC, all open incidents and up to 100 recently opened resolved incidents.
+  Unknown tasks return 404. Both HTML routes return HTML 401 pages for missing/incorrect bearer
+  credentials, escape dynamic content and reuse the rerun pages' no-store, CSP, frame and referrer
+  security headers. Output URLs are displayed as escaped text.
+
+History tests cover pagination, incident windows, paused schedule visibility, retention boundaries,
+unresolved incident preservation, HTML authentication/escaping, and scanner event instrumentation.
