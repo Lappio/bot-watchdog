@@ -23,16 +23,20 @@ export function validateExpression(expression: string): boolean {
 
 /** Inclusive boundaries; null means the expression has no occurrence in that direction. */
 export function previousOccurrence(expression: string, timezone: string, instant: Date): Date | null {
-  if (!Number.isFinite(instant.getTime())) throw new Error('Invalid instant');
-  const cron = job(expression, timezone);
-  const minute = new Date(Math.floor(instant.getTime() / 60000) * 60000);
-  // Croner strips milliseconds and normally excludes the reference second.
-  return cron.previousRuns(1, new Date(minute.getTime() + 1000))[0] ?? null;
+  try {
+    if (!Number.isFinite(instant.getTime())) return null;
+    const cron = job(expression, timezone);
+    const minute = new Date(Math.floor(instant.getTime() / 60000) * 60000);
+    // Croner strips milliseconds and normally excludes the reference second.
+    return cron.previousRuns(1, new Date(minute.getTime() + 1000))?.[0] ?? null;
+  } catch { return null; }
 }
 
 export function nextOccurrence(expression: string, timezone: string, instant: Date): Date | null {
-  if (!Number.isFinite(instant.getTime())) throw new Error('Invalid instant');
-  const cron = job(expression, timezone);
-  if (instant.getTime() % 60000 === 0 && previousOccurrence(expression, timezone, instant)?.getTime() === instant.getTime()) return new Date(instant);
-  return cron.nextRun(instant);
+  try {
+    if (!Number.isFinite(instant.getTime())) return null;
+    const cron = job(expression, timezone);
+    if (instant.getTime() % 60000 === 0 && previousOccurrence(expression, timezone, instant)?.getTime() === instant.getTime()) return new Date(instant);
+    return cron.nextRun(instant);
+  } catch { return null; }
 }

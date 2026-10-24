@@ -226,3 +226,22 @@ describe('heartbeats', () => {
     expect(await env.DB.prepare('SELECT resolution, resolved_at FROM incidents WHERE id = ?').bind('past').first()).toMatchObject({ resolution: 'late_heartbeat', resolved_at: expect.any(String) });
   });
 });
+
+it('initializes the public anchor and preserves it on no-op and unrelated patches', async () => {
+  const { task } = await create();
+  expect(task.schedule_anchor_at).toBe(task.created_at);
+  await env.DB.prepare('UPDATE tasks SET schedule_anchor_at = ? WHERE id = ?').bind('2020-01-01T00:00:00.000Z', task.id).run();
+  for (const body of [{ schedule: valid.schedule }, { timezone: valid.timezone }, { name: 'Renamed' }, { paused: true }]) {
+    const response = await api(`/${task.id}`, 'PATCH', body);
+    expect((await response.json<any>()).task.schedule_anchor_at).toBe('2020-01-01T00:00:00.000Z');
+  }
+});
+it('rejects never-firing cron on create and PATCH without changing the task', async () => {
+  const { task } = await create();
+  for (const [path, method, body] of [['', 'POST', { ...valid, schedule: '0 0 31 2 *' }], [`/${task.id}`, 'PATCH', { schedule: '0 0 31 2 *' }]] as const) {
+    const response = await api(path, method, body);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toMatchObject({ error: { code: 'validation_error', message: 'schedule never fires' } });
+  }
+  expect((await (await api(`/${task.id}`)).json<any>()).task.schedule).toBe(valid.schedule);
+});

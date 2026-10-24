@@ -1,4 +1,4 @@
-import { validateExpression, validateTimezone } from './cron';
+import { nextOccurrence, validateExpression, validateTimezone } from './cron';
 import { HttpError } from './http';
 import type { Task } from './models';
 export function invalid(message: string): never { throw new HttpError(400, 'validation_error', message); }
@@ -12,6 +12,9 @@ export function taskInput(body: Record<string, unknown>, existing?: Task) {
   if (typeof data.name !== 'string' || data.name.trim().length < 1 || data.name.length > 100) invalid('name must be 1..100 characters');
   if (typeof data.schedule !== 'string' || !validateExpression(data.schedule)) invalid('schedule must be a valid five-field cron');
   if (typeof data.timezone !== 'string' || !validateTimezone(data.timezone)) invalid('timezone must be a valid IANA timezone');
+  const now = new Date();
+  const next = nextOccurrence(data.schedule, data.timezone, now);
+  if (!next || next.getTime() > now.getTime() + 5 * 366 * 86400000) invalid('schedule never fires');
   if (!Number.isInteger(data.grace_minutes) || (data.grace_minutes as number) < 1 || (data.grace_minutes as number) > 1440) invalid('grace_minutes must be an integer from 1 to 1440');
   if (!['email', 'telegram'].includes(data.alert_channel as string)) invalid('alert_channel must be telegram or email');
   if (typeof data.alert_target !== 'string' || !(data.alert_channel === 'email' ? /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(data.alert_target) : /^(?:-?\d+|@[a-zA-Z][a-zA-Z0-9_]{4,31})$/.test(data.alert_target))) invalid('Invalid alert_target');

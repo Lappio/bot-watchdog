@@ -1,5 +1,5 @@
 import { env, fetchMock, createScheduledController, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
-import { afterEach, expect, it } from 'vitest';
+import { afterEach, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { runScan } from '../src/scanner';
 import { sha256 } from '../src/security';
@@ -20,7 +20,7 @@ const scanEnv = () => ({ ...env, TELEGRAM_BOT_TOKEN: 'test-telegram-token', RESE
 function telegram(check: (body: any) => void = () => {}, status = 200) {
   fetchMock.get('https://api.telegram.org').intercept({ path: '/bottest-telegram-token/sendMessage', method: 'POST' }).reply(status, options => { check(JSON.parse(options.body as string)); return '{}'; });
 }
-afterEach(() => fetchMock.assertNoPendingInterceptors());
+afterEach(() => { vi.useRealTimers(); fetchMock.assertNoPendingInterceptors(); });
 it('opens only the latest overdue occurrence, hashes the link token, and sends once', async () => {
   const t = await task();
   expect(await runScan(scanEnv(), new Date(now.getTime() - 1))).toMatchObject({ opened: 0 });
@@ -203,4 +203,97 @@ it('returns before slow Telegram completes and deduplicates concurrent runs and 
   telegram();
   await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}/fail`, { method: 'POST' }));
   expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents WHERE resolved_at IS NULL').first('n')).toBe(1);
+});
+
+async function patchTask(id: string, body: unknown) {
+  const response = await heartbeatFetch(new Request(`https://watchdog.test/api/tasks/${id}`, {
+    method: 'PATCH', headers: { Authorization: 'Bearer test-admin-token', 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }));
+  expect(response.status).toBe(200);
+  return (await response.json<any>()).task;
+}
+it.each(['resume', 'timezone', 'cron'])('anchors %s to the change and alerts only a later occurrence', async mode => {
+  const t = await task({ schedule: mode === 'cron' ? '0 0 1 1 *' : '0 9 * * *' });
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-24T08:00:00Z'));
+  if (mode === 'resume') await patchTask(t.id, { paused: true });
+  if (mode === 'resume') expect(await runScan(scanEnv(), now)).toMatchObject({ opened: 0 });
+  vi.setSystemTime(new Date('2026-10-24T09:16:30Z'));
+  const changed = await patchTask(t.id, mode === 'resume' ? { paused: false } : mode === 'timezone' ? { timezone: 'Asia/Shanghai' } : { schedule: '* * * * *' });
+  expect(changed.schedule_anchor_at).toBe('2026-10-24T09:16:30.000Z');
+  expect(await runScan(scanEnv(), new Date('2026-10-24T09:31:00Z'))).toMatchObject({ opened: 0 });
+  telegram();
+  expect(await runScan(scanEnv(), new Date(mode === 'cron' ? '2026-10-24T09:33:00Z' : mode === 'timezone' ? '2026-10-25T01:15:00Z' : '2026-10-25T09:15:00Z'))).toMatchObject({ opened: 1 });
+});
+it('isolates a directly inserted never-firing schedule', async () => {
+  await task({ schedule: '0 0 31 2 *' }); await task(); telegram();
+  expect(await runScan(scanEnv(), now)).toEqual({ checked: 2, opened: 1, errors: 1 });
+});
+it('aggregates consecutive misses, claims backoff reminders once, and starts fresh after a heartbeat', async () => {
+  const t = await task({ schedule: '* * * * *', grace_minutes: 1 });
+  telegram();
+  for (let minute = 0; minute < 30; minute++) await runScan(scanEnv(), new Date(+now + minute * 60000));
+  expect(await env.DB.prepare('SELECT * FROM incidents').first()).toMatchObject({ occurrence_count: 30, last_reminder_at: null, alert_status: 'sent' });
+  for (const hour of [1, 2, 3, 4, 8, 16, 40, 64]) {
+    if (hour !== 3) telegram(body => {
+      expect(body.text).toContain('still missing'); expect(body.text).toContain('missed occurrences since');
+      expect(body.text).toContain('last expected'); expect(body.text).toContain('heartbeat');
+      expect(body.text).not.toContain('/rerun/'); expect(body.reply_markup).toBeUndefined();
+    });
+    const at = new Date(+now + hour * 3600000);
+    await Promise.all([runScan(scanEnv(), at), runScan(scanEnv(), at)]);
+    await runScan(scanEnv(), at);
+  }
+  expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents').first('n')).toBe(1);
+  expect(await env.DB.prepare('SELECT occurrence_count FROM incidents').first('occurrence_count')).toBe(38);
+  vi.useFakeTimers({ toFake: ['Date'] }); vi.setSystemTime(new Date(+now + 65 * 3600000));
+  telegram(); await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
+  expect(await env.DB.prepare('SELECT resolution FROM incidents').first('resolution')).toBe('late_heartbeat');
+  telegram(); await runScan(scanEnv(), new Date(+now + 65 * 3600000 + 120000));
+  expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents').first('n')).toBe(2);
+});
+it('logs reminder delivery failure without overwriting the original alert status', async () => {
+  await task(); telegram(); await runScan(scanEnv(), now);
+  telegram(undefined, 503); await runScan(scanEnv(), new Date(+now + 3600000));
+  expect(await env.DB.prepare('SELECT alert_status, alert_error, last_reminder_at FROM incidents').first()).toMatchObject({ alert_status: 'sent', alert_error: null, last_reminder_at: new Date(+now + 3600000).toISOString() });
+  await runScan(scanEnv(), new Date(+now + 3600000));
+});
+it('skips resolved incidents in the rerun unknown sweep', async () => {
+  const t = await task({ paused: 1 });
+  await env.DB.prepare("INSERT INTO incidents (id,task_id,kind,expected_at,opened_at,resolved_at,rerun_status,rerun_requested_at) VALUES ('resolved',?,'missed',?,?,?,'requested',?)")
+    .bind(t.id, now.toISOString(), now.toISOString(), now.toISOString(), new Date(+now - 6 * 60000).toISOString()).run();
+  expect(await runScan(scanEnv(), now)).toEqual({ checked: 0, opened: 0, errors: 0 });
+  expect(await env.DB.prepare('SELECT rerun_status,rerun_unknown_alert_status FROM incidents').first()).toEqual({ rerun_status: 'requested', rerun_unknown_alert_status: null });
+});
+it.each(['resume', 'timezone', 'cron'])('opens a full alert after %s moves the anchor past an open missed incident', async mode => {
+  const t = await task();
+  telegram();
+  await runScan(scanEnv(), now);
+  const old = await env.DB.prepare('SELECT * FROM incidents').first<any>();
+  vi.useFakeTimers({ toFake: ['Date'] });
+  vi.setSystemTime(new Date('2026-10-24T09:16:00Z'));
+  if (mode === 'resume') await patchTask(t.id, { paused: true });
+  vi.setSystemTime(new Date('2026-10-24T09:16:30Z'));
+  await patchTask(t.id, mode === 'resume' ? { paused: false } : mode === 'timezone' ? { timezone: 'Asia/Shanghai' } : { schedule: '* * * * *' });
+  const at = new Date(mode === 'cron' ? '2026-10-24T09:33:00Z' : mode === 'timezone' ? '2026-10-25T01:15:00Z' : '2026-10-25T09:15:00Z');
+  let link = '';
+  telegram(body => {
+    expect(body.text).not.toContain('still missing');
+    link = body.reply_markup.inline_keyboard[0][0].url;
+    expect(link).toContain('/rerun/');
+  });
+  const scans = await Promise.all([runScan(scanEnv(), at), runScan(scanEnv(), at)]);
+  expect(scans.reduce((sum, scan) => sum + scan.opened, 0)).toBe(1);
+  expect(scans.every(scan => scan.errors === 0)).toBe(true);
+  await runScan(scanEnv(), at);
+  const { results } = await env.DB.prepare('SELECT * FROM incidents ORDER BY expected_at').all<any>();
+  expect(results).toHaveLength(2);
+  expect(results[0]).toEqual(old);
+  expect(results[1]).toMatchObject({ resolved_at: null, occurrence_count: 1, alert_status: 'sent', rerun_token_hash: await sha256(new URL(link).searchParams.get('t')!) });
+  expect(link).toContain(`/rerun/${results[1].id}?t=`);
+  // Both open incidents remain recoverable by a heartbeat.
+  vi.setSystemTime(at);
+  telegram(); telegram();
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
+  expect(await env.DB.prepare("SELECT COUNT(*) AS n FROM incidents WHERE resolution = 'late_heartbeat'").first('n')).toBe(2);
 });

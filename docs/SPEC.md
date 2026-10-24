@@ -11,7 +11,7 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
 - No web framework required; a tiny router is fine (Hono is also acceptable if it keeps things small).
 - Cron expression handling: use a small, zero/low-dependency library that works in workerd (e.g. `croner`)
   OR a well-tested own 5-field parser. Must support standard 5-field cron (minute hour dom month dow,
-  with `*`, lists, ranges, steps) and an IANA `timezone` per task (default `UTC`). Validate on registration.
+  with `*`, lists, ranges, steps) and an IANA `timezone` per task (default `UTC`). Validate on create and PATCH: reject schedules without a next occurrence within approximately five years from now in the configured timezone, with 400 validation_error ("schedule never fires"). Cron next/previous helpers catch evaluation errors and return null.
 
 ## Config (env)
 - vars (wrangler.toml [vars], non-secret): `PUBLIC_BASE_URL` (e.g. http://localhost:8787), `ALERT_FROM_EMAIL`.
@@ -90,9 +90,9 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
 
 ## Scanner (scheduled handler, every minute)
 For each non-paused task: find the most recent cron occurrence `due` (in the task timezone) such that
-`due + grace_minutes <= now` and `due >= task.created_at`. If there is no heartbeat with `received_at >= due`
-(any heartbeat after the occurrence counts as that run) and no incident exists yet for (task,'missed',due), insert the
-incident (INSERT OR IGNORE on the unique key; only send if the row was actually inserted), then send the alert.
+`due + grace_minutes <= now` and `due >= (task.schedule_anchor_at ?? task.created_at)`. If there is no heartbeat with `received_at >= due`
+(any heartbeat after the occurrence counts as that run) and no open missed incident exists for the task and no incident exists yet for (task,'missed',due), insert the
+incident (INSERT OR IGNORE ... SELECT ... WHERE NOT EXISTS an open missed incident, on the unique occurrence key; only send if the row was actually inserted), then send the alert.
 Only the latest occurrence is checked per scan (no backfill storms after downtime).
 Alert content: task name, expected time (UTC + task timezone), grace, last heartbeat time/status, and a
 "Confirm re-run" link to `PUBLIC_BASE_URL/rerun/<incident_id>?t=<token>` (only if the task has a webhook).
@@ -102,14 +102,26 @@ For a Telegram HTTP 400 with a button, resend once without reply_markup. Record 
 mention the fallback in alert_error only when that fallback fails. Email: Resend `POST https://api.resend.com/emails` with from/to/subject/html+text.
 Scanner must be resilient: one task failing must not stop the others.
 Each scan independently sweeps requested reruns older than RERUN_RESULT_TIMEOUT_MINUTES = 5 with no
-response code or error recorded, even with no active tasks. A conditional UPDATE changes requested to unknown;
+response code or error recorded, even with no active tasks. Both the SELECT and claiming UPDATE require resolved_at IS NULL. A conditional UPDATE changes requested to unknown;
 only its winner attempts one alert on the task channel, without a rerun link. The alert explains that the request
 may already have been delivered but its result was never recorded; check whether the task actually ran; no automatic retry.
 Record rerun_unknown_alert_status/error separately. This does not resolve the incident; a later heartbeat
 still resolves missed incidents as late_heartbeat. Isolate the sweep in its own try/catch so task scanning continues.
 Migration 0003_hardening.sql rebuilds incidents preserving all existing columns/data and the unique occurrence key,
 and adds the task/heartbeat columns and initial partial unique index. Migration 0004 replaces that index with the non-unique heartbeat lookup index for schedule-period deduplication. Heartbeat dropped-field handling and failed-incident occurrence aggregation use these fields.
-Schedule anchoring and reminders remain reserved for later work.
+Public task objects expose schedule_anchor_at. Initialize it to created_at on create; reset it to now on PATCH only for paused true->false or an actual schedule/timezone change. No-op or unrelated patches preserve it. Occurrences strictly before the anchor never alert, including occurrences during pauses.
+While a missed incident is open, aggregate newer overdue occurrences with a conditional UPDATE:
+`WHERE id = ? AND resolved_at IS NULL AND (last_occurrence_at IS NULL OR last_occurrence_at < due) AND expected_at < due`;
+increment occurrence_count and set last_occurrence_at = due once per observed occurrence. No new normal alert.
+Remind when `now - (last_reminder_at ?? opened_at) >= min(24h, max(1h, (last_reminder_at ?? opened_at) - opened_at))`.
+Atomically claim last_reminder_at with a conditional UPDATE matching its previous value and resolved_at IS NULL;
+only the winner delivers. Text says still missing, N missed occurrences since opened_at, last expected due,
+and that sending a heartbeat resolves it. No rerun link. Log reminder delivery failures without overwriting alert_status/error.
+With timely scans reminders occur at approximately +1h, +2h, +4h, +8h, +16h, then every 24h.
+A heartbeat resolves the open missed incident as late_heartbeat; a subsequent miss opens a fresh incident and full alert.
+Limitations: only the latest overdue occurrence is observed per scan; counts do not backfill downtime.
+Scan delays shift reminder timing. Claims precede delivery, so crashes/provider failures can lose reminders; no automatic retry.
+Tasks whose cron cannot be evaluated increment scan errors and are skipped without affecting other tasks.
 
 ## Onboarding snippet (text the user pastes into their bot's task instructions)
 Plain language tells the agent to POST at the end of every run, even after a failure, after delivering the result.

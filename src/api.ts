@@ -15,7 +15,7 @@ export async function management(request: Request, env: Env, id?: string, action
     const data = taskInput(await jsonBody(request));
     const token = pingToken();
     const now = new Date().toISOString();
-    const task: Task = { ...data, id: randomId('tsk_'), ping_token_hash: await sha256(token), schedule_anchor_at: null, created_at: now, updated_at: now, last_heartbeat_at: null, last_status: null };
+    const task: Task = { ...data, id: randomId('tsk_'), ping_token_hash: await sha256(token), schedule_anchor_at: now, created_at: now, updated_at: now, last_heartbeat_at: null, last_status: null };
     const keys = Object.keys(task);
     await env.DB.prepare(`INSERT INTO tasks (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`).bind(...Object.values(task)).run();
     return Response.json({ task: publicTask(task), ...credentials(task, env, token) }, { status: 201 });
@@ -41,8 +41,10 @@ export async function management(request: Request, env: Env, id?: string, action
   }
   if (method === 'PATCH') {
     const data = { ...taskInput(await jsonBody(request), task), updated_at: new Date().toISOString() };
-    await env.DB.prepare(`UPDATE tasks SET ${Object.keys(data).map(k => `${k} = ?`).join(',')} WHERE id = ?`).bind(...Object.values(data), id).run();
-    return Response.json({ task: publicTask({ ...task, ...data }) });
+    const resetAnchor = (task.paused === 1 && data.paused === 0) || task.schedule !== data.schedule || task.timezone !== data.timezone;
+    const anchored = { ...data, schedule_anchor_at: resetAnchor ? data.updated_at : task.schedule_anchor_at };
+    await env.DB.prepare(`UPDATE tasks SET ${Object.keys(anchored).map(k => `${k} = ?`).join(',')} WHERE id = ?`).bind(...Object.values(anchored), id).run();
+    return Response.json({ task: publicTask({ ...task, ...anchored }) });
   }
   if (method === 'DELETE') {
     await env.DB.prepare('DELETE FROM tasks WHERE id = ?').bind(id).run();

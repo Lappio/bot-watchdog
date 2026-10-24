@@ -39,3 +39,12 @@ describe('cron calculations inside workerd', () => {
     expect(nextOccurrence('0 9 * * *', 'America/New_York', new Date(at))?.toISOString()).toBe(next);
   });
 });
+
+it('returns null for impossible schedules, invalid zones, syntax and instants', () => {
+  for (const calculate of [previousOccurrence, nextOccurrence]) {
+    expect(calculate('0 0 31 2 *', 'UTC', new Date('2026-10-24T00:00:00Z'))).toBeNull();
+    expect(calculate('* * * * *', 'Invalid/Zone', new Date())).toBeNull();
+    expect(calculate('bad', 'UTC', new Date())).toBeNull();
+    expect(calculate('* * * * *', 'UTC', new Date(NaN))).toBeNull();
+  }
+});
