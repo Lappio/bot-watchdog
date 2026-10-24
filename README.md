@@ -397,9 +397,35 @@ All endpoints below require `Authorization: Bearer <ADMIN_TOKEN>`.
   records succeeded and resolves as rerun_ok. Existing token routes retain token checks
   and their response formats. No automatic retry.
 
-Static hosting is prepared via Workers Static Assets at `dashboard/dist`. A future Vite
-app will use base `/dashboard/` and output `dashboard/dist/dashboard/`; no dashboard app
-is included in Unit 1. GET `/` and `/dashboard` return 302 to `/dashboard/`.
+Static hosting uses Workers Static Assets at `dashboard/dist`. The Unit 2 Vite
+app uses base `/dashboard/` and outputs `dashboard/dist/dashboard/`; see Dashboard below. GET `/` and `/dashboard` return 302 to `/dashboard/`.
 API, heartbeat, rerun, admin and health routes remain Worker routes. The tracked
 `dashboard/dist/.gitkeep` keeps the assets directory present on fresh clones before any
 build; generated files in that directory are ignored. Keep this placeholder when building.
+
+## Dashboard
+
+The React dashboard uses the official [shadcn/ui dashboard-01 block](https://ui.shadcn.com/view/new-york-v4/dashboard-01): a responsive sidebar, overview cards, interactive activity chart, and sortable/filterable task table. Manage tasks, inspect paginated runs and incidents, copy onboarding snippets, and explicitly confirm webhook re-runs. Re-runs never auto-retry. Light, dark, and system themes are supported.
+
+With Node 22 and the Worker configured/migrated as above:
+
+```sh
+npm run dashboard:install && npm run dashboard:build
+npx wrangler dev --local
+```
+
+Open http://localhost:8787/dashboard/ and paste your `ADMIN_TOKEN`. The token is stored in this browser under `bw_admin_token`, sent as a Bearer header, and cleared on logout or any API 401. The theme is saved under `bw_theme`. Create a task and save the one-time ping-token snippet before closing its dialog; later snippet copies contain a token placeholder.
+
+For frontend development, keep Wrangler running at port 8787 and run in another terminal:
+
+```sh
+npm --prefix dashboard run dev
+```
+
+Open the Vite URL at `/dashboard/`; Vite proxies `/api`, `/hb`, `/rerun`, `/admin`, and `/healthz` to Wrangler. The app uses hash routes (`#/`, `#/tasks`, `#/tasks/:id`, `#/incidents`, `#/settings`) and needs no server SPA fallback. Overview refreshes every 60 seconds and has a manual refresh button. Daily chart buckets use UTC. Run history uses the API's timestamp cursor and 90-day retention; equal timestamps at page boundaries can be skipped. Incident lists show up to 500 results.
+
+The dashboard is a separate npm package with its own lockfile. `npm run dashboard:typecheck`, `npm run dashboard:test`, and `npm run dashboard:build` validate it; CI runs those alongside the Worker job. Build output is `dashboard/dist/dashboard/`, with `/dashboard/` asset URLs; `dashboard/dist/.gitkeep` is preserved. Workers Static Assets serve the build and the Worker retains the `/` and `/dashboard` 302 redirects.
+
+shadcn components retained (installed using the real CLI): Alert, AlertDialog, Badge, Breadcrumb, Button, Card, Chart, Dialog, DropdownMenu, Input, Label, Select, Separator, Sheet, Sidebar, Skeleton, Sonner, Switch, Table, Tabs, Tooltip, Textarea. The block initially also installed Avatar, Checkbox, Drawer, Toggle, and ToggleGroup; these unused components and demo drag-and-drop dependencies were removed. Forms use controlled inputs with Zod validation; the data table uses TanStack Table v8.
+
+简体中文：仪表盘提供任务管理、心跳统计图、运行历史和事件查看，支持深色模式及手动确认 webhook 重跑（绝不自动重试）。运行 `npm run dashboard:install && npm run dashboard:build`，再运行 `npx wrangler dev --local`，打开 http://localhost:8787/dashboard/ 并粘贴 `ADMIN_TOKEN` 登录。前端开发可另开终端运行 `npm --prefix dashboard run dev`，通过代理连接 8787 端口的 Worker；创建任务后请保存仅显示一次的心跳令牌。

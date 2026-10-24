@@ -299,3 +299,22 @@ is included in Unit 1. GET `/` and `/dashboard` return 302 to `/dashboard/`.
 API, heartbeat, rerun, admin and health routes remain Worker routes. The tracked
 `dashboard/dist/.gitkeep` keeps the assets directory present on fresh clones before any
 build; generated files in that directory are ignored. Keep this placeholder when building.
+
+## Dashboard app (Unit 2)
+
+`dashboard/` is an independent Vite + React + TypeScript npm package using Tailwind v4
+and CLI-installed shadcn/ui components, adapted from dashboard-01. It builds to
+`dashboard/dist/dashboard/` with base `/dashboard/`, preserving `dist/.gitkeep`.
+Hash routes cover overview, tasks, task detail, incidents, and settings without SPA fallback.
+Static Assets run the Worker first only for `/` and `/dashboard`, preserving explicit 302 redirects.
+
+The operator pastes ADMIN_TOKEN into a password login card; localStorage key
+`bw_admin_token` supplies same-origin API Bearer headers. Any 401 clears it and returns to login.
+Logout clears it; `bw_theme` stores light/dark/system preferences. Overview refreshes every
+60 seconds and displays stats, UTC daily series, and the task table. Tasks support sorting,
+filtering, pagination, create/edit validation, pause/resume, snippet copy, and confirmed deletion.
+Detail shows cursor-paginated runs, a loaded-run daily chart, incidents, and public configuration.
+Creation displays the one-time credentials and snippet. Incident re-runs require an explicit
+AlertDialog confirmation and never automatically retry. API errors, loading, and empty states
+are visible. Separate dashboard CI runs npm ci, typecheck, jsdom tests, and production build;
+the Worker test suite is scoped to test/ so the two environments remain independent.

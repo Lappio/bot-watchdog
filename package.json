@@ -10,7 +10,11 @@
     "dev": "wrangler dev",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "db:migrate:local": "wrangler d1 migrations apply DB --local"
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "dashboard:install": "npm --prefix dashboard ci",
+    "dashboard:build": "npm --prefix dashboard run build",
+    "dashboard:test": "npm --prefix dashboard test",
+    "dashboard:typecheck": "npm --prefix dashboard run typecheck"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "0.12.21",
