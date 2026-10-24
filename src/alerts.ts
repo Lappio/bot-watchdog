@@ -46,7 +46,7 @@ async function recordDelivery(env: Env, incident: Incident, send: () => Promise<
   await env.DB.prepare(sql).bind(error === null ? 'sent' : 'failed', error, incident.id).run();
 }
 
-export async function notifyIncidentOpened(env: Env, task: Task, incident: Incident, rerunToken?: string): Promise<void> {
+export async function notifyIncidentOpened(env: Env, task: Task, incident: Incident, rerunToken?: string, resultDetail?: string): Promise<void> {
   await recordDelivery(env, incident, async () => {
     let link: string | undefined;
     if (task.rerun_webhook_url) {
@@ -56,9 +56,9 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
       }
       link = `${env.PUBLIC_BASE_URL.replace(/\/$/, '')}/rerun/${incident.id}?t=${encodeURIComponent(rerunToken)}`;
     }
-    const kind = incident.kind === 'failed' ? 'reported failure' : 'missed';
+    const kind = incident.kind === 'failed' ? 'reported failure' : incident.kind === 'deliverable_missing' ? 'deliverable missing' : 'missed';
     const local = new Intl.DateTimeFormat('en-GB', { timeZone: task.timezone, dateStyle: 'full', timeStyle: 'long' }).format(new Date(incident.expected_at));
-    const lines = [task.name, `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minute${task.grace_minutes === 1 ? '' : 's'}`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
+    const lines = [task.name, ...(resultDetail ? [`Result: ${resultDetail}`] : []), `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minute${task.grace_minutes === 1 ? '' : 's'}`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
     if (incident.kind === 'failed') {
       const heartbeat = await env.DB.prepare('SELECT message FROM heartbeats WHERE task_id = ? AND received_at = ? AND status = ? ORDER BY id LIMIT 1').bind(task.id, incident.expected_at, 'fail').first<{ message: string | null }>();
       if (heartbeat?.message) lines.push(`Failure message: ${heartbeat.message}`);

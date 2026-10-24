@@ -1,5 +1,6 @@
+import { runDeliverableCheck } from './deliverable';
 import type { Env } from './env';
-import type { Incident, Task } from './models';
+import type { Heartbeat, Incident, Task } from './models';
 import { previousOccurrence } from './cron';
 import { notifyIncidentOpened, notifyMissedReminder, notifyRerunUnknown } from './alerts';
 import { pingToken, randomId, sha256 } from './security';
@@ -10,6 +11,56 @@ export const RERUN_RESULT_TIMEOUT_MINUTES = 5;
 
 export async function runScan(env: Env, now: Date): Promise<{ checked: number; opened: number; errors: number }> {
   const summary = { checked: 0, opened: 0, errors: 0 };
+  try {
+    const interruptedCutoff = new Date(now.getTime() - 2 * 60000).toISOString();
+    const { results: interrupted } = await env.DB.prepare("SELECT * FROM deliverable_checks WHERE status = 'pending' AND attempts >= 1 AND due_at <= ? ORDER BY due_at LIMIT 20")
+      .bind(interruptedCutoff).all<{ id: string; task_id: string; heartbeat_id: string; attempts: number }>();
+    const { results: checks } = await env.DB.prepare("SELECT * FROM deliverable_checks WHERE status = 'pending' AND attempts = 0 AND due_at <= ? ORDER BY due_at LIMIT 20")
+      .bind(now.toISOString()).all<{ id: string; task_id: string; heartbeat_id: string; attempts: number }>();
+    for (const check of [...interrupted, ...checks]) {
+      try {
+        const isInterrupted = check.attempts >= 1;
+        const claim = isInterrupted
+          ? await env.DB.prepare("UPDATE deliverable_checks SET status = 'failed', result_detail = 'check interrupted', finished_at = ? WHERE id = ? AND status = 'pending' AND attempts >= 1 AND due_at <= ?")
+            .bind(now.toISOString(), check.id, interruptedCutoff).run()
+          : await env.DB.prepare("UPDATE deliverable_checks SET attempts = attempts + 1 WHERE id = ? AND status = 'pending' AND attempts = 0 AND due_at <= ?")
+          .bind(check.id, now.toISOString()).run();
+        if (claim.meta.changes !== 1) continue;
+        const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(check.task_id).first<Task>();
+        const heartbeat = await env.DB.prepare('SELECT * FROM heartbeats WHERE id = ?').bind(check.heartbeat_id).first<Heartbeat>();
+        if (!task || !heartbeat || (!isInterrupted && task.deliverable_check === 'none')) {
+          await env.DB.prepare("UPDATE deliverable_checks SET status = 'skipped', finished_at = ? WHERE id = ?").bind(now.toISOString(), check.id).run();
+          continue;
+        }
+        const result = isInterrupted ? { ok: false, detail: 'check interrupted' } : await runDeliverableCheck(env, task, heartbeat);
+        const incidentId = randomId('inc_');
+        const statements = [env.DB.prepare('UPDATE deliverable_checks SET status = ?, result_detail = ?, finished_at = ? WHERE id = ?')
+          .bind(result.ok ? 'passed' : 'failed', result.detail, now.toISOString(), check.id)];
+        if (result.ok) {
+          statements.push(env.DB.prepare("UPDATE incidents SET resolved_at = ?, resolution = 'deliverable_ok' WHERE task_id = ? AND kind = 'deliverable_missing' AND expected_at = ? AND resolved_at IS NULL")
+            .bind(now.toISOString(), task.id, heartbeat.received_at));
+        } else {
+          statements.push(env.DB.prepare("INSERT OR IGNORE INTO incidents (id,task_id,kind,expected_at,opened_at) VALUES (?,?,'deliverable_missing',?,?)")
+            .bind(incidentId, task.id, heartbeat.received_at, now.toISOString()));
+          statements.push(env.DB.prepare("UPDATE deliverable_checks SET opened_incident_id = (SELECT id FROM incidents WHERE task_id = ? AND kind = 'deliverable_missing' AND expected_at = ?) WHERE id = ?")
+            .bind(task.id, heartbeat.received_at, check.id));
+        }
+        const results = await env.DB.batch(statements);
+        await recordScanEvent(env, now, task.id, result.ok ? 'scan_deliverable_passed' : 'scan_deliverable_failed', check.id, result.detail);
+        if (!result.ok && results[1].meta.changes === 1) {
+          summary.opened++;
+          const incident = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(incidentId).first<Incident>();
+          if (incident) await notifyIncidentOpened(env, task, incident, undefined, result.detail);
+        }
+      } catch (error) {
+        summary.errors++;
+        await recordScanEvent(env, now, check.task_id, 'scan_error', check.id, error instanceof Error ? error.message : 'Deliverable sweep failed');
+      }
+    }
+  } catch (error) {
+    summary.errors++;
+    console.error('Deliverable sweep failed', error instanceof Error ? error.message : 'Unknown error');
+  }
   // Independent sweep also runs when every task is paused or there are no due tasks.
   try {
     const cutoff = new Date(now.getTime() - RERUN_RESULT_TIMEOUT_MINUTES * 60000).toISOString();

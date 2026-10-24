@@ -39,7 +39,11 @@ export async function heartbeat(request: Request, env: Env, token: string, fail:
     statements.push(
       env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'late_heartbeat' WHERE task_id = ? AND kind = 'missed' AND resolved_at IS NULL AND expected_at <= ? AND ${gate} RETURNING *`).bind(now, task.id, now, id),
     );
-    statements.push(env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'recovered' WHERE task_id = ? AND kind = 'failed' AND resolved_at IS NULL AND ${gate} RETURNING *`).bind(now, task.id, id));
+    statements.push(env.DB.prepare(`UPDATE incidents SET resolved_at = ?, resolution = 'recovered' WHERE task_id = ? AND kind IN ('failed','deliverable_missing') AND resolved_at IS NULL AND ${gate} RETURNING *`).bind(now, task.id, id));
+  }
+  if (status === 'ok' && task.deliverable_check !== 'none') {
+    statements.push(env.DB.prepare(`INSERT INTO deliverable_checks (id,task_id,heartbeat_id,due_at,created_at) SELECT ?,?,?,?,? WHERE ${gate}`)
+      .bind(randomId('chk_'), task.id, id, new Date(instant.getTime() + task.deliverable_delay_minutes * 60000).toISOString(), now, id));
   }
   const results = await env.DB.batch<Incident>(statements);
   if (results[0].meta.changes === 0) {

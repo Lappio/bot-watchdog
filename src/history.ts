@@ -6,8 +6,7 @@ import { escapeHtml, htmlResponse } from './html';
 import { randomId } from './security';
 
 export const HISTORY_RETENTION_DAYS = 90;
-type ScanEventKind = 'scan_opened_missed' | 'scan_reminder' | 'scan_error' | 'rerun_unknown';
-// Deliverable event kinds are reserved in the migration for the next unit.
+type ScanEventKind = 'scan_opened_missed' | 'scan_reminder' | 'scan_error' | 'rerun_unknown' | 'scan_deliverable_failed' | 'scan_deliverable_passed';
 export async function recordScanEvent(env: Env, now: Date, taskId: string, kind: ScanEventKind, refId: string | null = null, detail: string | null = null): Promise<void> {
   try {
     await env.DB.prepare('INSERT INTO scan_events (id,task_id,at,kind,ref_id,detail) VALUES (?,?,?,?,?,?)')
@@ -54,7 +53,7 @@ export async function scheduleTasks(env: Env, now: Date) {
     env.DB.prepare('SELECT id,task_id,kind,expected_at,opened_at,alert_status FROM incidents WHERE resolved_at IS NULL ORDER BY opened_at DESC, id DESC').all<Pick<Incident, 'id' | 'task_id' | 'kind' | 'expected_at' | 'opened_at' | 'alert_status'>>(),
   ]);
   return tasks.map(task => ({
-    id: task.id, name: task.name, schedule: task.schedule, timezone: task.timezone,
+    deliverable_check: task.deliverable_check, id: task.id, name: task.name, schedule: task.schedule, timezone: task.timezone,
     grace_minutes: task.grace_minutes, paused: Boolean(task.paused), last_heartbeat_at: task.last_heartbeat_at,
     last_status: task.last_status, schedule_anchor_at: task.schedule_anchor_at, created_at: task.created_at,
     next_run: nextOccurrence(task.schedule, task.timezone, now)?.toISOString() ?? null,
