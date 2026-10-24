@@ -1,3 +1,5 @@
 ADMIN_TOKEN="replace-with-a-random-admin-token"
 TELEGRAM_BOT_TOKEN="replace-with-your-telegram-bot-token"
 RESEND_API_KEY="replace-with-your-resend-api-key"
+# Optional read-access PAT for GitHub deliverable checks
+GITHUB_TOKEN=

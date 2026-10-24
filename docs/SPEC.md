@@ -1,4 +1,4 @@
-# bot-watchdog — product & API spec (Phase 1 MVP)
+# bot-watchdog — product & API spec (Phases 1–2)
 
 External watchdog for scheduled tasks on hosted agent platforms (e.g. Grok Bot). Alerts when a task
 didn't run, ran late, or reported failure. Runs outside the platform (Cloudflare Workers + D1), so it
@@ -16,7 +16,8 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
 ## Config (env)
 - vars (wrangler.toml [vars], non-secret): `PUBLIC_BASE_URL` (e.g. http://localhost:8787), `ALERT_FROM_EMAIL`.
 - secrets (wrangler secret put / .dev.vars, NEVER committed; document with `.dev.vars.example` placeholders):
-  `ADMIN_TOKEN` (bearer for management API), `TELEGRAM_BOT_TOKEN`, `RESEND_API_KEY` (email via Resend HTTP API).
+  `ADMIN_TOKEN` (bearer for management API), `TELEGRAM_BOT_TOKEN`, `RESEND_API_KEY` (email via Resend HTTP API),
+  optional `GITHUB_TOKEN` (read-access PAT for GitHub deliverable checks).
 - If a channel's secret is missing, the alert attempt is recorded as failed with a clear error; never crash the scan.
 - wrangler.toml must use a placeholder `database_id` (e.g. "00000000-0000-0000-0000-000000000000") with a comment
   telling the user to run `wrangler d1 create bot-watchdog` and paste the id. No real account ids.
@@ -30,14 +31,14 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
   paused (0/1), created_at, updated_at, last_heartbeat_at, last_status, schedule_anchor_at (nullable text; migration backfills created_at).
 - heartbeats: id, task_id, received_at, status ('ok'|'fail'), run_id (nullable), output_url (nullable),
   message (nullable, truncated to 2000 chars), dropped_fields (nullable text, JSON array of field names). Index on (task_id, received_at). Non-unique index on (task_id, run_id, status, received_at).
-- incidents: id (`inc_`+random), task_id, kind ('missed'|'failed'), expected_at (ISO, the scheduled occurrence; for
-  'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|'recovered'|null),
+- incidents: id (`inc_`+random), task_id, kind ('missed'|'failed'|'deliverable_missing'), expected_at (ISO, the scheduled occurrence; for
+  'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|'recovered'|'deliverable_ok'|null),
   alert_status ('pending'|'sent'|'failed'), alert_error (original alert delivery only),
   recovery_notice_status (null before attempt, otherwise 'sent'|'failed'), recovery_notice_error,
   rerun_token_hash, rerun_requested_at, rerun_status
   ('none'|'requested'|'succeeded'|'failed'|'unknown'), rerun_response_code, rerun_error,
   rerun_unknown_alert_status (nullable 'sent'|'failed'), rerun_unknown_alert_error (nullable text),
-  occurrence_count (integer NOT NULL DEFAULT 1), last_occurrence_at (nullable text), last_reminder_at (nullable text).
+  occurrence_count (integer NOT NULL DEFAULT 1), last_occurrence_at (nullable text), last_reminder_at (nullable text), reminder_claim_until (nullable text).
   UNIQUE(task_id, kind, expected_at) so the scanner is idempotent.
 All timestamps ISO-8601 UTC strings. Use parameterized queries only.
 
@@ -59,7 +60,7 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
   `POST /hb/:ping_token` JSON body `{ status?: "ok"|"fail" (default ok), run_id?, output_url?, message? }`
   also `GET /hb/:ping_token` and `POST /hb/:ping_token/fail` as no-body shortcuts (for curl one-liners).
   -> 200 `{ ok: true, task_id, received_at }`; 404 on unknown token. Updates task.last_heartbeat_at/last_status.
-  A heartbeat resolves any open 'missed' incident of that task whose expected_at <= received_at (resolution 'late_heartbeat')
+  Only an ok heartbeat resolves any open 'missed' incident of that task whose expected_at <= received_at (resolution 'late_heartbeat')
   and sends a short "recovered (late)" notice on the task's channel. A status 'fail' heartbeat opens a 'failed' incident
   and queues an alert via ctx.waitUntil; all heartbeat database writes finish before responding, without waiting for delivery.
   Optional run_id must be a string <=200 characters; output_url an HTTP(S) URL <=2000 characters;
@@ -70,7 +71,7 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
   Duplicates return 200 {ok:true, duplicate:true, task_id, received_at:<original time>} with no side effects.
   All incident/task mutations must be gated on insertion of the heartbeat, including concurrent requests.
   While an open failed incident exists, new failures increment occurrence_count and set last_occurrence_at
-  without another incident or alert. Fail heartbeats never resolve failed incidents.
+  without another incident or alert. Fail heartbeats never resolve missed or failed incidents.
   An ok heartbeat resolves open failed incidents with resolution recovered and resolved_at, and queues
   "recovered: an ok heartbeat was received after a failure". Record recovery_notice_status/error separately.
   Missed-incident recovery notices also run via ctx.waitUntil. Tests asserting delivery must await the execution context.
@@ -114,13 +115,17 @@ While a missed incident is open, aggregate newer overdue occurrences with a cond
 `WHERE id = ? AND resolved_at IS NULL AND (last_occurrence_at IS NULL OR last_occurrence_at < due) AND expected_at < due`;
 increment occurrence_count and set last_occurrence_at = due once per observed occurrence. No new normal alert.
 Remind when `now - (last_reminder_at ?? opened_at) >= min(24h, max(1h, (last_reminder_at ?? opened_at) - opened_at))`.
-Atomically claim last_reminder_at with a conditional UPDATE matching its previous value and resolved_at IS NULL;
-only the winner delivers. Text says still missing, N missed occurrences since opened_at, last expected due,
+Serialize sends with a separate conditional reminder_claim_until lease (60 seconds, recoverable after a crash),
+matching the previous last_reminder_at and resolved_at IS NULL. Only the claim winner delivers; release the lease
+after the attempt. Advance last_reminder_at with a conditional compare-and-set only after successful delivery.
+On failure preserve last_reminder_at so the next scan retries. Migration 0005 adds the nullable lease column.
+Text says still missing, N missed occurrences since expected_at, last expected last_occurrence_at ?? expected_at,
 and that sending a heartbeat resolves it. No rerun link. Log reminder delivery failures without overwriting alert_status/error.
 With timely scans reminders occur at approximately +1h, +2h, +4h, +8h, +16h, then every 24h.
-A heartbeat resolves the open missed incident as late_heartbeat; a subsequent miss opens a fresh incident and full alert.
+An ok heartbeat resolves the open missed incident as late_heartbeat; a subsequent miss opens a fresh incident and full alert.
 Limitations: only the latest overdue occurrence is observed per scan; counts do not backfill downtime.
-Scan delays shift reminder timing. Claims precede delivery, so crashes/provider failures can lose reminders; no automatic retry.
+Scan delays shift reminder timing. Provider failures retry on the next scan; a crash leaves the claim retryable after its lease expires.
+A crash after provider acceptance but before recording success can cause a duplicate reminder on retry.
 Tasks whose cron cannot be evaluated increment scan errors and are skipped without affecting other tasks.
 
 ## Onboarding snippet (text the user pastes into their bot's task instructions)
@@ -142,3 +147,114 @@ Include task name, schedule, and grace in the snippet header.
   rerun GET doesn't trigger, POST triggers exactly once, concurrent/double POST -> one webhook call, bad token -> 403/404.
 - Scripts in package.json: `dev` (wrangler dev), `test` (vitest run), `typecheck` (tsc --noEmit),
   `db:migrate:local` (wrangler d1 migrations apply DB --local).
+
+## Phase 2: history and cross-bot schedules
+Migration `0006_history_schedule.sql` adds only `scan_events`: id (text primary key), task_id
+(nullable FK to tasks, cascade delete), at (required UTC ISO timestamp), kind, ref_id and detail
+(nullable text). Allowed kinds: scan_opened_missed, scan_reminder, scan_error,
+scan_deliverable_failed, scan_deliverable_passed, rerun_unknown. Indexes cover (task_id, at) and at.
+The scanner records missed-incident openings, successful reminder sends, rerun transitions to unknown,
+and per-task errors. Inserts are best effort: a logging failure never interrupts scanning.
+Deliverable sweeps record scan_deliverable_failed and scan_deliverable_passed with check IDs and result details.
+
+`HISTORY_RETENTION_DAYS = 90` is exported from `src/history.ts`. At the end of every scan,
+including scans with all tasks paused, delete heartbeats with received_at strictly before now minus
+90 days, scan_events with at before that cutoff, and incidents with non-null resolved_at before
+that cutoff. Preserve unresolved incidents regardless of age, and preserve rows exactly at the cutoff.
+Task last-heartbeat summaries remain available after old heartbeat rows are pruned.
+
+All four endpoints below require the existing admin bearer token (no cookies):
+- `GET /api/tasks/:id/runs?limit=50&before=<ISO>` returns `{ runs, next_before, incidents }`.
+  Runs are ordered by received_at DESC, id DESC. Limit defaults to 50 and is clamped to 1..200.
+  A before cursor restricts received_at strictly below that timestamp; next_before is the oldest
+  timestamp in the page, or null on an empty page. Equal timestamps can therefore be skipped at
+  page boundaries. Incidents belong to the same task and have opened_at or expected_at within
+  the inclusive oldest-to-newest run time window; empty pages return no incidents. Unknown tasks
+  return 404; invalid before timestamps return 400.
+- `GET /api/schedule` returns `{ tasks }` for every task, including paused ones. Fields: id, name,
+  schedule, timezone, grace_minutes, paused (boolean), last_heartbeat_at, last_status,
+  schedule_anchor_at, created_at, next_run, open_incidents, deliverable_check. Compute next_run with nextOccurrence
+  in the task timezone at request time, even while paused; null means no evaluable occurrence.
+  Each open incident includes id, kind, expected_at, opened_at, alert_status. Sort next_run ascending,
+  nulls last, then name. No alert targets or webhook credentials are exposed.
+- `GET /admin/schedule` renders a self-contained read-only HTML table of names, schedules/timezones,
+  next runs, last heartbeats/statuses, pause state, open incident summaries and task-history links.
+- `GET /admin/tasks/:id/history` renders the task header, last 100 heartbeats ordered by
+  received_at DESC, id DESC, all open incidents and up to 100 recently opened resolved incidents.
+  Unknown tasks return 404. Both HTML routes return HTML 401 pages for missing/incorrect bearer
+  credentials, escape dynamic content and reuse the rerun pages' no-store, CSP, frame and referrer
+  security headers. Output URLs are displayed as escaped text.
+
+History tests cover pagination, incident windows, paused schedule visibility, retention boundaries,
+unresolved incident preservation, HTML authentication/escaping, and scanner event instrumentation.
+
+## Phase 2: deliverable checks
+
+Migration `0007_deliverable_checks.sql` rebuilds incidents to allow `deliverable_missing` and
+resolution `deliverable_ok`, preserving every existing column (including reminder claims and
+rerun alert tracking) and the unique (task_id, kind, expected_at) key.
+It adds these mutable task fields, accepted by POST and PATCH and exposed in public tasks:
+
+- `deliverable_check`: `none` (default), `http`, or `github`.
+- `deliverable_config`: nullable JSON object, accepted as an object or JSON string, stored as
+  JSON text and returned as an object. Unknown keys are tolerated and ignored by checkers.
+- `deliverable_delay_minutes`: integer 0..1440, default 5.
+
+HTTP config: `{ "url"?: "https://...", "expect_status"?: 200, "expect_contains"?: "ready" }`.
+URL must use HTTP(S); omitted URL falls back to this run's heartbeat.output_url. Missing both
+fails with `no url`. A GET uses manual redirects and a 10-second timeout. Default success is
+2xx (redirects fail); expect_status, when supplied, requires that exact numeric status.
+expect_contains is a string of at most 500 characters and must occur within the first 64 KiB
+of the response body. Network failures become failed results rather than aborting the sweep.
+
+GitHub config: `{ "type": "commit"|"pr"|"issue"|"file"|"url", "owner": "org", "repo": "repo",
+"sha"?: "...", "ref"?: "main", "number"?: 123, "path"?: "reports/result.md", "url"?: "https://..." }`.
+Owner and repo are required except for type=url, which requires an HTTP(S) URL. Optional
+ref/path/sha must be strings and number a positive integer. Commit fetches
+`/repos/:owner/:repo/commits/:sha-or-ref` (defaults to HEAD); pr fetches `pulls/:number`, issue
+fetches `issues/:number`, and file fetches `contents/:path?ref=:ref`. PR/issue without a number
+and file without a path fail clearly. Type=url fetches the supplied URL directly; use a trusted
+URL because it receives the token. These are existence/access checks, not content comparisons.
+
+Set the optional secret `GITHUB_TOKEN` to a classic or fine-grained PAT with read access to
+the checked resources. Missing token fails with `GITHUB_TOKEN is not configured`. Requests use
+Authorization: Bearer, Accept: application/vnd.github+json, X-GitHub-Api-Version: 2022-11-28,
+and User-Agent: bot-watchdog. All 2xx responses pass; 404 and other non-2xx fail with their
+status. Requests time out after 10 seconds and never forward the token through redirects.
+Never commit real tokens; `.dev.vars.example` contains an empty placeholder.
+
+A non-duplicate ok heartbeat atomically inserts a pending deliverable check in the same database
+batch as the heartbeat. Fail and duplicate heartbeats schedule nothing. The due time is receipt
+plus the configured delay; delay zero is eligible on the next scan. Notifications remain on
+waitUntil. Existing tasks default to none, preserving heartbeat-only behavior.
+
+The deliverable_checks table stores id (primary key), task_id and heartbeat_id (required cascading
+foreign keys), due_at, status (pending/passed/failed/skipped; default pending), attempts (default 0),
+result_detail, opened_incident_id, created_at, finished_at. The last four fields except created_at
+are nullable. Index deliverable_checks_due covers (status, due_at).
+
+Each scan independently selects up to 20 due pending checks with attempts=0, even for paused tasks.
+An atomic conditional attempts increment claims each row once across concurrent scans. The checker
+uses the current task configuration and the original heartbeat; a disabled check is skipped.
+Completion stores passed/failed, detail, and finished_at. Completion and incident changes share
+an atomic batch. A pending claimed check (attempts >= 1) becomes failed with detail "check interrupted"
+once its due time is at least two minutes old, opening the usual incident and alert. A later configuration change does not reset existing claims.
+
+Failure opens a deliverable_missing incident with expected_at=heartbeat.received_at, and records
+the incident ID on the check. The unique incident key prevents duplicate openings/alerts.
+Alert kind text is "deliverable missing", includes result_detail and offers confirm-rerun when a
+webhook is configured. Success resolves an open deliverable_missing incident for that task and
+same expected_at with resolution deliverable_ok, without a recovery notice. Separately, any new
+ok heartbeat resolves open deliverable_missing incidents with resolution recovered in the same
+batch as failed-incident recovery. A later failed deliverable check may open a fresh incident.
+Fail heartbeats do not resolve these incidents. Pruning old heartbeats cascades to their checks;
+unresolved incidents are preserved independently.
+
+Slack and email deliverable connectors are interface stubs only: their exported async
+checkDeliverable functions return `{ ok: false, detail: 'not_implemented' }`. They are not accepted
+task check types. Connector authentication and lookups are follow-up work; no OAuth is implemented.
+Email alert delivery through Resend remains available.
+
+Phase 2 also includes the completed A/B/C corrections: only ok heartbeats resolve missed incidents;
+reminder timestamps advance only after successful sends (failed sends retry with a separate lease);
+reminder "since" uses incident.expected_at rather than incident.opened_at.

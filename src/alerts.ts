@@ -46,7 +46,7 @@ async function recordDelivery(env: Env, incident: Incident, send: () => Promise<
   await env.DB.prepare(sql).bind(error === null ? 'sent' : 'failed', error, incident.id).run();
 }
 
-export async function notifyIncidentOpened(env: Env, task: Task, incident: Incident, rerunToken?: string): Promise<void> {
+export async function notifyIncidentOpened(env: Env, task: Task, incident: Incident, rerunToken?: string, resultDetail?: string): Promise<void> {
   await recordDelivery(env, incident, async () => {
     let link: string | undefined;
     if (task.rerun_webhook_url) {
@@ -56,9 +56,9 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
       }
       link = `${env.PUBLIC_BASE_URL.replace(/\/$/, '')}/rerun/${incident.id}?t=${encodeURIComponent(rerunToken)}`;
     }
-    const kind = incident.kind === 'failed' ? 'reported failure' : 'missed';
+    const kind = incident.kind === 'failed' ? 'reported failure' : incident.kind === 'deliverable_missing' ? 'deliverable missing' : 'missed';
     const local = new Intl.DateTimeFormat('en-GB', { timeZone: task.timezone, dateStyle: 'full', timeStyle: 'long' }).format(new Date(incident.expected_at));
-    const lines = [task.name, `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minute${task.grace_minutes === 1 ? '' : 's'}`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
+    const lines = [task.name, ...(resultDetail ? [`Result: ${resultDetail}`] : []), `Kind: ${kind}`, `Expected: ${incident.expected_at} (UTC)`, `Expected in ${task.timezone}: ${local}`, `Grace: ${task.grace_minutes} minute${task.grace_minutes === 1 ? '' : 's'}`, `Last heartbeat: ${task.last_heartbeat_at ?? 'never'} / ${task.last_status ?? 'none'}`];
     if (incident.kind === 'failed') {
       const heartbeat = await env.DB.prepare('SELECT message FROM heartbeats WHERE task_id = ? AND received_at = ? AND status = ? ORDER BY id LIMIT 1').bind(task.id, incident.expected_at, 'fail').first<{ message: string | null }>();
       if (heartbeat?.message) lines.push(`Failure message: ${heartbeat.message}`);
@@ -76,11 +76,13 @@ export async function notifyRerunUnknown(env: Env, task: Task, incident: Inciden
     `${task.name}: The previous re-run request may already have been delivered to the webhook but its result was never recorded. Check whether the task actually ran; no automatic retry.`), 'unknown');
 }
 
-export async function notifyMissedReminder(env: Env, task: Task, incident: Incident): Promise<void> {
+export async function notifyMissedReminder(env: Env, task: Task, incident: Incident): Promise<boolean> {
   try {
     await deliver(env, task, `${task.name}: still missing`,
-      `${task.name}: still missing, ${incident.occurrence_count} missed occurrences since ${incident.opened_at}, last expected ${incident.last_occurrence_at ?? incident.expected_at}. Reply by sending a heartbeat to resolve this incident.`);
+      `${task.name}: still missing, ${incident.occurrence_count} missed occurrences since ${incident.expected_at}, last expected ${incident.last_occurrence_at ?? incident.expected_at}. Reply by sending a heartbeat to resolve this incident.`);
+    return true;
   } catch (error) {
     console.error('Missed reminder delivery failed', incident.id, error instanceof Error ? error.message : 'Unknown error');
+    return false;
   }
 }

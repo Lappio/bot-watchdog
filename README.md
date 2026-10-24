@@ -192,7 +192,7 @@ curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
 
 Migration 0003 also adds `occurrence_count` (default 1), nullable `last_occurrence_at` and `last_reminder_at`, task `schedule_anchor_at` (existing tasks backfilled from creation), and heartbeat `dropped_fields` (nullable JSON array text). Failed incidents aggregate occurrences, and heartbeat ingestion records dropped optional fields. Missed incidents aggregate observed overdue occurrences and use backoff reminders; schedule anchoring excludes occurrences before creation, resume, or schedule/timezone changes.
 
-Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed` or `failed`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, or `recovered`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
+Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed`, `failed`, or `deliverable_missing`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, `recovered`, or `deliverable_ok`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
 
 ### Confirm a rerun
 
@@ -265,7 +265,8 @@ Creation/rotation substitute the real token. For deployment, set `PUBLIC_BASE_UR
 | `ADMIN_TOKEN` | secret / local `.dev.vars` | Management API bearer credential |
 | `TELEGRAM_BOT_TOKEN` | secret / local `.dev.vars` | Telegram alert delivery |
 | `RESEND_API_KEY` | secret / local `.dev.vars` | Email alert delivery |
-| `DB` | D1 binding | Tasks, heartbeats, incidents |
+| `GITHUB_TOKEN` | optional secret / local `.dev.vars` | Read-access PAT for GitHub deliverable checks |
+| `DB` | D1 binding | Tasks, heartbeats, incidents, deliverable checks and scan events |
 
 Keep `.dev.vars` private. `.dev.vars.example` contains placeholders. Only the provider used by a task needs credentials; missing provider secrets produce a recorded failed alert or recovery notice. Missing `ADMIN_TOKEN` disables management with 503.
 
@@ -282,7 +283,7 @@ npx wrangler d1 migrations apply DB --remote
 npx wrangler deploy
 ```
 
-Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply all migrations too: `0002_recovery_notice.sql` adds recovery delivery fields; `0003_hardening.sql` rebuilds incidents with the expanded status constraints and adds the hardening columns and initial heartbeat unique index; `0004_heartbeat_dedup_window.sql` replaces that index with a non-unique index for schedule-period deduplication. For local databases use `npm run db:migrate:local`.
+Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply all migrations too: `0002_recovery_notice.sql` adds recovery delivery fields; `0003_hardening.sql` rebuilds incidents with the expanded status constraints and adds the hardening columns and initial heartbeat unique index; `0004_heartbeat_dedup_window.sql` replaces that index with a non-unique index for schedule-period deduplication. `0005_reminder_claim.sql` adds reminder leases, `0006_history_schedule.sql` adds scan events, and `0007_deliverable_checks.sql` adds deliverable checks and expands incident constraints. For local databases use `npm run db:migrate:local`.
 
 ## Security and operational limits
 
@@ -290,7 +291,7 @@ Ping and rerun tokens are random credentials stored as SHA-256 hashes. Admin com
 
 Rerun GET requests never trigger execution, so link previews cannot confirm a rerun. The GET heartbeat shortcut does record a heartbeat: prefer POST in bot instructions. Rerun confirmation is single-shot and idempotent even under concurrent submissions. Webhook receivers should also enforce the `Idempotency-Key` header to avoid duplicate work. A crash after claiming a rerun can leave its result unrecorded. Each scheduled scan changes unresolved requests older than five minutes with no recorded result to `unknown` and attempts one separate alert, even for paused tasks. The alert has no rerun link: the request may already have reached the webhook, so check whether the task ran. There is no automatic retry. The incident stays open; a later heartbeat resolves a missed incident normally. Delivery is tracked in `rerun_unknown_alert_status/error`.
 
-Monitoring depends on the bot sending a heartbeat; it does not independently verify delivery. Grace is configurable per task. The scanner checks only the latest occurrence whose grace has elapsed, skips occurrences strictly before `schedule_anchor_at ?? created_at`, and treats any heartbeat at or after that occurrence as evidence of a run. It does not backfill missed runs after downtime. The anchor is initialized to creation time and reset to now on resume or an actual schedule/timezone change; no-op patches and unrelated edits preserve it. Paused time and occurrences before a schedule change do not count as missed. While a missed incident remains open, newer overdue occurrences increment its `occurrence_count` and update `last_occurrence_at` once per observed occurrence, with no new incident or normal alert. Reminders have no rerun link and are claimed once at approximately 1, 2, 4, 8, and 16 hours after opening, then every 24 hours (scan delays can shift this timing). A heartbeat resolves the incident; the next miss opens a fresh incident with a full alert. Reminder delivery failures are logged without changing the original alert status. A unique incident key prevents duplicate alerts for the same occurrence; failed deliveries are recorded without automatic retries. Counts reflect occurrences observed by scans, not backfilled runs. Cron evaluation failures count as scan errors and do not stop other tasks. Reminder claims precede delivery, so a crash or provider failure can lose a reminder; there is no delivery retry. Only unpaused tasks are scanned. The task detail API exposes the latest 20 heartbeats; there is no run-history browsing API. This deployment serves one tenant.
+Monitoring depends on the bot sending a heartbeat; optional HTTP/GitHub deliverable checks verify the configured output after ok heartbeats. Grace is configurable per task. The scanner checks only the latest occurrence whose grace has elapsed, skips occurrences strictly before `schedule_anchor_at ?? created_at`, and treats any heartbeat at or after that occurrence as evidence of a run. It does not backfill missed runs after downtime. The anchor is initialized to creation time and reset to now on resume or an actual schedule/timezone change; no-op patches and unrelated edits preserve it. Paused time and occurrences before a schedule change do not count as missed. While a missed incident remains open, newer overdue occurrences increment its `occurrence_count` and update `last_occurrence_at` once per observed occurrence, with no new incident or normal alert. Reminders have no rerun link and are claimed once at approximately 1, 2, 4, 8, and 16 hours after opening, then every 24 hours (scan delays can shift this timing). An ok heartbeat resolves the incident; the next miss opens a fresh incident with a full alert. Reminder delivery failures are logged without changing the original alert status. A unique incident key prevents duplicate alerts for the same occurrence; failed deliveries are recorded without automatic retries. Counts reflect occurrences observed by scans, not backfilled runs. Cron evaluation failures count as scan errors and do not stop other tasks. Reminder claims use a temporary lease; failures preserve the successful-send timestamp and retry on the next scan. A crash after provider acceptance may cause a duplicate reminder. Missed-run scanning covers unpaused tasks; already queued deliverable checks also run for paused tasks. The task detail API exposes the latest 20 heartbeats; the history API provides older retained runs. This deployment serves one tenant.
 
 ## Development and CI
 
@@ -301,18 +302,64 @@ npm test
 
 Tests run in workerd with local D1 migrations and mocked outbound requests; external network connections are disabled in tests. GitHub Actions runs `npm ci`, typecheck, and tests on pushes and pull requests using Node 22 with read-only repository permissions.
 
-## Phase 2 roadmap
+## Follow-up work
 
-These are planned, not implemented:
-
-- Deliverable checks through read-only Slack, email, and GitHub access.
-- Long-term run history beyond the hosted platform's last 20 runs.
-- A cross-bot schedule view.
-- Telegram callback buttons for confirmation (current alerts use URL buttons).
-- Multi-tenant operation.
+Slack/email deliverable connectors, Telegram callback confirmation, and multi-tenant operation
+remain follow-up work. Slack/email check modules currently return `not_implemented`; email alerts
+through Resend are supported.
 
 ## 简体中文
 
 bot-watchdog 是运行在 Cloudflare Workers + D1 上的外部定时任务看门狗，适用于 Grok Bot 等托管智能体平台。平台暂停或限流时，它仍能独立监控。任务完成后发送心跳；超过 cron 时间和宽限期未收到心跳，或任务报告失败时，通过 Telegram 或邮件告警。可配置重新运行的 webhook，但必须手动确认，绝不自动重跑。当前为单租户版本。
 
 快速开始：安装 Node 22，运行 `npm install`，复制 `cp .dev.vars.example .dev.vars` 并填写管理令牌及告警渠道密钥，然后运行 `npm run db:migrate:local` 和 `npx wrangler dev --local --test-scheduled`。按上方 curl 示例创建任务，将返回的 `snippet` 粘贴到机器人的任务指令中。用 `curl 'http://localhost:8787/__scheduled?cron=*+*+*+*+*'` 手动触发本地扫描，再通过管理 API 查看事件。生产环境需自行创建 D1 数据库、填写数据库 ID、配置公开 URL 和密钥、应用远程迁移并部署。
+
+第二阶段已提供 HTTP/GitHub 交付检查（成功心跳后延迟 0–1440 分钟，默认 5 分钟），GitHub 检查需配置只读 `GITHUB_TOKEN`。历史 API 和跨机器人日程页面使用管理 Bearer 令牌，历史保留 90 天，未解决事件持续保留；Slack/邮件交付检查目前仅为接口占位。失败心跳不会关闭漏跑事件，提醒发送失败可重试，提醒起点使用首次应运行时间。
+
+## Phase 2: deliverables, history and schedules
+
+After applying migration `0006_history_schedule.sql`, use your `Authorization: Bearer <ADMIN_TOKEN>`
+header to access `/admin/schedule` and `/admin/tasks/:id/history`. The schedule includes paused tasks,
+next scheduled runs and open incidents; task history shows the last 100 heartbeats and open/recent incidents.
+These pages use bearer headers, with no cookie login.
+
+JSON clients can use `GET /api/schedule` and `GET /api/tasks/:id/runs?limit=50&before=<ISO>`.
+Run pages return `runs`, `incidents` in the page's time window, and `next_before`; pass that timestamp
+as `before` for the next page (limit 1–200). Timestamp-only pagination may skip runs sharing the
+boundary timestamp. A null cursor means the page is empty.
+
+Every scan prunes heartbeats and scan events older than 90 days, plus incidents resolved more than
+90 days ago. Unresolved incidents are retained. Scanner events record missed openings, successful
+reminders, rerun unknown transitions and per-task errors on a best-effort basis. Deliverable outcomes also produce scan events.
+
+Apply migration `0007_deliverable_checks.sql` for deliverable checks. Create or patch a task with:
+
+```json
+{
+  "deliverable_check": "http",
+  "deliverable_config": { "expect_contains": "ready" },
+  "deliverable_delay_minutes": 5
+}
+```
+
+HTTP checks use config.url or that run's output_url, pass on 2xx by default, and optionally require
+expect_status or expect_contains (first 64 KiB). Requests time out after 10 seconds without
+following redirects. Delay is 0–1440 minutes (default 5); zero checks on the next scan. Existing
+tasks default to `none`. Only new, non-duplicate ok heartbeats schedule a check.
+
+For GitHub, use `deliverable_check: "github"` and config such as
+`{"type":"file","owner":"my-org","repo":"reports","path":"daily.md","ref":"main"}`.
+Types are commit (sha/ref), pr (number), issue (number), file (path/ref), or url (url instead of
+owner/repo). Configure the optional read-access PAT with `npx wrangler secret put GITHUB_TOKEN`,
+or locally in `.dev.vars`. Missing tokens produce a failed check with a clear error. The token
+is sent to type=url URLs, so use trusted destinations. Never commit real tokens.
+
+Interrupted claimed checks become failed with detail `check interrupted` about two minutes after their due time.
+Failure opens a `deliverable_missing` incident with check details and the usual confirm-rerun
+link if configured. An ok heartbeat resolves open deliverable incidents as `recovered`; a passed
+check resolves an open incident for the same run timestamp as `deliverable_ok` without a notice.
+Checks use current task configuration when scanned. Claimed checks are attempted once; a crash
+may leave a claimed pending row requiring operator attention. See [SPEC](docs/SPEC.md) for details.
+
+Phase 2 fixes A/B/C: fail heartbeats leave missed incidents open; reminder timestamps advance only
+after successful delivery, allowing retry; reminder "since" uses the first expected time.
