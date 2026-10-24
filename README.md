@@ -407,6 +407,10 @@ build; generated files in that directory are ignored. Keep this placeholder when
 
 The React dashboard uses the official [shadcn/ui dashboard-01 block](https://ui.shadcn.com/view/new-york-v4/dashboard-01): a responsive sidebar, overview cards, interactive activity chart, and sortable/filterable task table. Manage tasks, inspect paginated runs and incidents, copy onboarding snippets, and explicitly confirm webhook re-runs. Re-runs never auto-retry. Light, dark, and system themes are supported.
 
+![Dashboard overview (light)](docs/screenshots/dashboard-overview-light.png)
+
+![Task detail with run history (dark)](docs/screenshots/dashboard-task-detail-dark.png)
+
 With Node 22 and the Worker configured/migrated as above:
 
 ```sh
