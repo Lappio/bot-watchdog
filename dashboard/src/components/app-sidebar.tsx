@@ -5,26 +5,18 @@ import {
   ListTodo,
   TriangleAlert,
   Settings,
-  LogOut,
 } from "lucide-react";
 import {
   Sidebar,
   SidebarContent,
-  SidebarFooter,
   SidebarHeader,
   SidebarMenu,
   SidebarMenuItem,
   SidebarMenuButton,
   SidebarGroup,
 } from "@/components/ui/sidebar";
-export function AppSidebar({
-  path,
-  logout,
-}: {
-  path: string;
-  logout: () => void;
-}) {
-  const { t, label: translateLabel } = useI18n();
+export function AppSidebar({ path }: { path: string }) {
+  const { label: translateLabel } = useI18n();
   return (
     <Sidebar collapsible="icon" variant="inset">
       <SidebarHeader>
@@ -60,16 +52,6 @@ export function AppSidebar({
           </SidebarMenu>
         </SidebarGroup>
       </SidebarContent>
-      <SidebarFooter>
-        <SidebarMenu>
-          <SidebarMenuItem>
-            <SidebarMenuButton onClick={logout}>
-              <LogOut />
-              <span>{t("Log out")}</span>
-            </SidebarMenuButton>
-          </SidebarMenuItem>
-        </SidebarMenu>
-      </SidebarFooter>
     </Sidebar>
   );
 }

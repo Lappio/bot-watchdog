@@ -1,7 +1,7 @@
 import { LanguageToggle } from "@/components/language-toggle";
 import { I18nProvider, useI18n } from "@/lib/i18n";
 import { lazy, Suspense, useCallback, useEffect, useState } from "react";
-import { RefreshCw } from "lucide-react";
+import { LogOut, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import {
   api,
@@ -31,7 +31,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Skeleton } from "@/components/ui/skeleton";
-import { TooltipProvider } from "@/components/ui/tooltip";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import { Card, CardHeader, CardTitle, CardContent } from "@/components/ui/card";
 import {
@@ -187,21 +187,7 @@ function Dashboard() {
           : t("Overview");
   return (
     <SidebarProvider>
-      <AppSidebar
-        path={path}
-        logout={() => {
-          localStorage.removeItem(TOKEN_KEY);
-          setToken(null);
-          setAuthError("");
-          setCredentials(undefined);
-          setPausing(undefined);
-          setDeleting(undefined);
-          setEditor(undefined);
-          setTasks([]);
-          setSchedule([]);
-          setStats(undefined);
-        }}
-      />
+      <AppSidebar path={path} />
       <SidebarInset>
         <header className="flex h-16 shrink-0 items-center gap-3 border-b px-4 lg:px-6">
           <SidebarTrigger />
@@ -222,6 +208,32 @@ function Dashboard() {
             </BreadcrumbList>
           </Breadcrumb>
           <div className="ml-auto flex gap-2">
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="gap-1.5 sm:w-auto sm:px-2.5"
+                  aria-label={t("Log out")}
+                  onClick={() => {
+                    localStorage.removeItem(TOKEN_KEY);
+                    setToken(null);
+                    setAuthError("");
+                    setCredentials(undefined);
+                    setPausing(undefined);
+                    setDeleting(undefined);
+                    setEditor(undefined);
+                    setTasks([]);
+                    setSchedule([]);
+                    setStats(undefined);
+                  }}
+                >
+                  <LogOut />
+                  <span className="hidden whitespace-nowrap sm:inline">{t("Log out")}</span>
+                </Button>
+              </TooltipTrigger>
+              <TooltipContent>{t("Log out")}</TooltipContent>
+            </Tooltip>
             <Button
               variant="outline"
               size="icon"
