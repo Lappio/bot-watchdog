@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { publicIncident } from './models';
 import type { Incident, Task } from './models';
 import { escapeHtml as esc, htmlResponse } from './html';
 import { sha256 } from './security';
@@ -40,13 +41,28 @@ export async function rerun(request: Request, env: Env, id: string): Promise<Res
   const respond = (current: Incident, ok: boolean, status: number) => wantsHtml
     ? page(task, current, token as string, ok ? 'Re-run succeeded.' : '', status)
     : Response.json({ ok, status: current.rerun_status, ...(!ok && current.resolved_at ? { resolved: true, resolution: current.resolution } : {}) }, { status });
-  if (!task.rerun_webhook_url || incident.resolved_at || incident.rerun_status === 'unknown') return respond(incident, false, 409);
+  const result = await claimAndRerun(env, task, incident, hash);
+  return respond(result.incident, result.ok, result.code);
+}
+
+export async function adminRerun(env: Env, id: string): Promise<Response> {
+  const incident = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(id).first<Incident>();
+  if (!incident) return Response.json({ ok: false, status: 'not_found', incident: null }, { status: 404 });
+  const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(incident.task_id).first<Task>();
+  if (!task) return Response.json({ ok: false, status: 'not_found', incident: null }, { status: 404 });
+  const result = await claimAndRerun(env, task, incident);
+  return Response.json({ ok: result.ok, status: result.incident.rerun_status, incident: publicIncident(result.incident) }, { status: result.code });
+}
+
+async function claimAndRerun(env: Env, task: Task, incident: Incident, tokenHash?: string): Promise<{ ok: boolean; code: number; incident: Incident }> {
+  const id = incident.id;
+  if (!task.rerun_webhook_url || incident.resolved_at || incident.rerun_status === 'unknown') return { incident, ok: false, code: 409 };
   // Only the winner of this database claim may make the external request.
-  const claimed = await env.DB.prepare("UPDATE incidents SET rerun_requested_at = ?, rerun_status = 'requested' WHERE id = ? AND rerun_token_hash = ? AND rerun_requested_at IS NULL AND resolved_at IS NULL AND rerun_status = 'none'")
-    .bind(new Date().toISOString(), id, hash).run();
+  const claimed = await env.DB.prepare(`UPDATE incidents SET rerun_requested_at = ?, rerun_status = 'requested' WHERE id = ? ${tokenHash !== undefined ? 'AND rerun_token_hash = ?' : ''} AND rerun_requested_at IS NULL AND resolved_at IS NULL AND rerun_status = 'none'`)
+    .bind(new Date().toISOString(), id, ...(tokenHash !== undefined ? [tokenHash] : [])).run();
   if (claimed.meta.changes !== 1) {
     const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(id).first<Incident>();
-    return respond(current ?? incident, false, 409);
+    return { incident: current ?? incident, ok: false, code: 409 };
   }
   let code: number | null = null;
   let error: string | null = null;
@@ -67,5 +83,5 @@ export async function rerun(request: Request, env: Env, id: string): Promise<Res
     resolution = CASE WHEN ? = 'succeeded' THEN 'rerun_ok' ELSE resolution END WHERE id = ?`)
     .bind(status, code, error, status, new Date().toISOString(), status, id).run();
   const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(id).first<Incident>();
-  return respond(current!, error === null, error === null ? 200 : 502);
+  return { incident: current!, ok: error === null, code: error === null ? 200 : 502 };
 }

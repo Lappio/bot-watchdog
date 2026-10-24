@@ -1,5 +1,5 @@
 export interface Task {
-  id: string; name: string; schedule: string; timezone: string; grace_minutes: number;
+  id: string; name: string; bot: string | null; schedule: string; timezone: string; grace_minutes: number;
   alert_channel: 'telegram' | 'email'; alert_target: string;
   rerun_webhook_url: string | null; rerun_webhook_secret: string | null; ping_token_hash: string;
   schedule_anchor_at: string | null; paused: number; created_at: string; updated_at: string; last_heartbeat_at: string | null;
@@ -26,4 +26,9 @@ export interface Heartbeat {
   id: string; task_id: string; received_at: string; status: 'ok' | 'fail';
   run_id: string | null; output_url: string | null; message: string | null;
   dropped_fields: string | null;
+}
+
+export function publicIncident<T extends Incident>(incident: T) {
+  const { rerun_token_hash: _hash, ...rest } = incident;
+  return rest;
 }

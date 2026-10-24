@@ -1,5 +1,8 @@
 node_modules/
 .wrangler/
 .dev.vars
-dist/
+/dist/
 coverage/
+
+dashboard/dist/*
+!dashboard/dist/.gitkeep

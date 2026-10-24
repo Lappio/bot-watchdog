@@ -167,7 +167,7 @@ curl "$BASE/api/incidents?status=open" -H "Authorization: Bearer $ADMIN_TOKEN"
 curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-`GET /api/incidents?status=open|all` → 200 `{"incidents":[...]}`; defaults to `open`, sorted by opening time descending. Example row:
+`GET /api/incidents?status=open|all&task_id=<id>&limit=200` → 200 `{"incidents":[...]}`; defaults to `open`, sorted by opening time descending. Example row:
 
 ```json
 {
@@ -182,7 +182,6 @@ curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
   "alert_error": null,
   "recovery_notice_status": null,
   "recovery_notice_error": null,
-  "rerun_token_hash": "example-sha256-hex",
   "rerun_requested_at": null,
   "rerun_status": "none",
   "rerun_response_code": null,
@@ -192,7 +191,7 @@ curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
 
 Migration 0003 also adds `occurrence_count` (default 1), nullable `last_occurrence_at` and `last_reminder_at`, task `schedule_anchor_at` (existing tasks backfilled from creation), and heartbeat `dropped_fields` (nullable JSON array text). Failed incidents aggregate occurrences, and heartbeat ingestion records dropped optional fields. Missed incidents aggregate observed overdue occurrences and use backoff reminders; schedule anchoring excludes occurrences before creation, resume, or schedule/timezone changes.
 
-Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed`, `failed`, or `deliverable_missing`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, `recovered`, or `deliverable_ok`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
+Incident JSON responses omit rerun_token_hash and never expose plaintext tokens. `kind` is `missed`, `failed`, or `deliverable_missing`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, `recovered`, or `deliverable_ok`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
 
 ### Confirm a rerun
 
@@ -363,3 +362,44 @@ may leave a claimed pending row requiring operator attention. See [SPEC](docs/SP
 
 Phase 2 fixes A/B/C: fail heartbeats leave missed incidents open; reminder timestamps advance only
 after successful delivery, allowing retry; reminder "since" uses the first expected time.
+
+
+## Dashboard Worker API (Unit 1)
+
+Migration `0008_task_bot.sql` adds nullable `tasks.bot`. Create and PATCH accept `bot` as
+null or a string trimmed to at most 100 characters; blank becomes null and omitted PATCH
+values are preserved. Public tasks and `/api/schedule` items include `bot`;
+`/admin/schedule` displays an escaped Bot column.
+
+All endpoints below require `Authorization: Bearer <ADMIN_TOKEN>`.
+
+- `GET /api/stats?days=14`: days is an integer 1..90 (default 14; invalid values return 400).
+  Returns `{ generated_at, totals, series }`. Totals contain `tasks`, `active` (not paused),
+  `paused`, `healthy`, `with_open_incidents` (distinct tasks, including paused tasks),
+  `open_incidents`, `heartbeats_24h`, and `failed_heartbeats_24h`. Healthy means not paused,
+  no open incidents, and last_status other than fail (including null). Heartbeat totals use
+  the inclusive rolling 24-hour window ending at generated_at. Series has one UTC day per
+  requested day including today, oldest first, zero-filled, with `{ date: 'YYYY-MM-DD',
+  ok, fail, incidents_opened }`. Daily counts use database GROUP BY aggregates; future
+  records after generated_at are excluded.
+- `GET /api/incidents?status=open|all&task_id=<id>&limit=200`: status defaults to open;
+  optional task_id restricts results to that task. Limit is an integer 1..500, default 200;
+  invalid limits return 400. Order remains opened_at descending then id. Each row includes
+  `task_name` and nullable `task_bot`. All incident JSON responses, including task detail,
+  run history and admin rerun, omit `rerun_token_hash`.
+- `POST /api/incidents/:id/rerun`: admin confirmation without a link token. Shares the
+  atomic claim and single webhook request with token confirmation. Returns
+  `{ ok, status, incident }` with the current rerun status and sanitized incident.
+  Success is 200, webhook failure is 502, missing incident/task is 404, and no webhook,
+  resolved incidents, previous requests or unknown results return 409. The claim requires
+  rerun_requested_at IS NULL, resolved_at IS NULL and rerun_status='none'. The webhook
+  receives Idempotency-Key equal to incident ID and optional Bearer secret; a 2xx result
+  records succeeded and resolves as rerun_ok. Existing token routes retain token checks
+  and their response formats. No automatic retry.
+
+Static hosting is prepared via Workers Static Assets at `dashboard/dist`. A future Vite
+app will use base `/dashboard/` and output `dashboard/dist/dashboard/`; no dashboard app
+is included in Unit 1. GET `/` and `/dashboard` return 302 to `/dashboard/`.
+API, heartbeat, rerun, admin and health routes remain Worker routes. The tracked
+`dashboard/dist/.gitkeep` keeps the assets directory present on fresh clones before any
+build; generated files in that directory are ignored. Keep this placeholder when building.

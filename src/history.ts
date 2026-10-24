@@ -1,4 +1,5 @@
 import type { Env } from './env';
+import { publicIncident } from './models';
 import type { Heartbeat, Incident, Task } from './models';
 import { nextOccurrence } from './cron';
 import { HttpError } from './http';
@@ -44,7 +45,7 @@ export async function taskRuns(request: Request, env: Env, id: string): Promise<
   const newest = runs[0]?.received_at;
   const incidents = oldest && newest ? (await env.DB.prepare('SELECT * FROM incidents WHERE task_id = ? AND ((opened_at >= ? AND opened_at <= ?) OR (expected_at >= ? AND expected_at <= ?)) ORDER BY opened_at DESC, id DESC')
     .bind(id, oldest, newest, oldest, newest).all<Incident>()).results : [];
-  return Response.json({ runs, next_before: oldest, incidents });
+  return Response.json({ runs, next_before: oldest, incidents: incidents.map(publicIncident) });
 }
 
 export async function scheduleTasks(env: Env, now: Date) {
@@ -53,7 +54,7 @@ export async function scheduleTasks(env: Env, now: Date) {
     env.DB.prepare('SELECT id,task_id,kind,expected_at,opened_at,alert_status FROM incidents WHERE resolved_at IS NULL ORDER BY opened_at DESC, id DESC').all<Pick<Incident, 'id' | 'task_id' | 'kind' | 'expected_at' | 'opened_at' | 'alert_status'>>(),
   ]);
   return tasks.map(task => ({
-    deliverable_check: task.deliverable_check, id: task.id, name: task.name, schedule: task.schedule, timezone: task.timezone,
+    deliverable_check: task.deliverable_check, id: task.id, name: task.name, bot: task.bot, schedule: task.schedule, timezone: task.timezone,
     grace_minutes: task.grace_minutes, paused: Boolean(task.paused), last_heartbeat_at: task.last_heartbeat_at,
     last_status: task.last_status, schedule_anchor_at: task.schedule_anchor_at, created_at: task.created_at,
     next_run: nextOccurrence(task.schedule, task.timezone, now)?.toISOString() ?? null,
@@ -66,8 +67,8 @@ function table(headers: string[], rows: string[]): string {
 }
 export async function scheduleHtml(env: Env): Promise<Response> {
   const tasks = await scheduleTasks(env, new Date());
-  return htmlResponse('<h1>Schedule</h1>' + table(['Name', 'Schedule / timezone', 'Next run', 'Last heartbeat / status', 'Paused', 'Open incidents', 'History'], tasks.map(task =>
-    `<tr>${cell(task.name)}${cell(`${task.schedule} / ${task.timezone}`)}${cell(task.next_run)}${cell(`${task.last_heartbeat_at ?? '—'} / ${task.last_status ?? '—'}`)}${cell(task.paused)}${cell(task.open_incidents.map(i => `${i.kind}: ${i.expected_at} (${i.alert_status})`).join('; '))}<td><a href="/admin/tasks/${escapeHtml(encodeURIComponent(task.id))}/history">History</a></td></tr>`)));
+  return htmlResponse('<h1>Schedule</h1>' + table(['Name', 'Bot', 'Schedule / timezone', 'Next run', 'Last heartbeat / status', 'Paused', 'Open incidents', 'History'], tasks.map(task =>
+    `<tr>${cell(task.name)}${cell(task.bot)}${cell(`${task.schedule} / ${task.timezone}`)}${cell(task.next_run)}${cell(`${task.last_heartbeat_at ?? '—'} / ${task.last_status ?? '—'}`)}${cell(task.paused)}${cell(task.open_incidents.map(i => `${i.kind}: ${i.expected_at} (${i.alert_status})`).join('; '))}<td><a href="/admin/tasks/${escapeHtml(encodeURIComponent(task.id))}/history">History</a></td></tr>`)));
 }
 export async function historyHtml(env: Env, id: string): Promise<Response> {
   const task = await getTask(env, id);
