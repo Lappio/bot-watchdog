@@ -9,7 +9,7 @@ export default defineWorkersConfig(async () => ({
         miniflare: {
           // The defineWorkersConfig-compatible pool bundles this runtime version.
           compatibilityDate: '2026-03-10',
-          bindings: { ADMIN_TOKEN: 'test-admin-token', TELEGRAM_BOT_TOKEN: 'test-telegram-token', RESEND_API_KEY: 'test-resend-key', TEST_MIGRATIONS: await readD1Migrations('./migrations') },
+          bindings: { PUBLIC_BASE_URL: 'https://watchdog.test', ADMIN_TOKEN: 'test-admin-token', TELEGRAM_BOT_TOKEN: 'test-telegram-token', RESEND_API_KEY: 'test-resend-key', TEST_MIGRATIONS: await readD1Migrations('./migrations') },
         },
       },
     },

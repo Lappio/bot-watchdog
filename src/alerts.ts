@@ -11,7 +11,7 @@ async function deliver(env: Env, task: Task, subject: string, text: string, link
     if (!env.TELEGRAM_BOT_TOKEN) throw new Error('TELEGRAM_BOT_TOKEN is not configured');
     url = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`;
     body = { chat_id: task.alert_target, text, disable_web_page_preview: true };
-    if (link) body.reply_markup = { inline_keyboard: [[{ text: 'Confirm re-run', url: link }]] };
+    if (link?.startsWith('https://')) body.reply_markup = { inline_keyboard: [[{ text: 'Confirm re-run', url: link }]] };
   } else {
     if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is not configured');
     url = 'https://api.resend.com/emails';
@@ -19,15 +19,28 @@ async function deliver(env: Env, task: Task, subject: string, text: string, link
     body = { from: env.ALERT_FROM_EMAIL, to: [task.alert_target], subject, text,
       html: `<p>${escapeHtml(text).replaceAll('\n', '<br>')}</p>${link ? `<p><a href="${escapeHtml(link)}">Confirm re-run</a></p>` : ''}` };
   }
-  const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+  const send = () => fetch(url, { method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+  let response = await send();
   await response.body?.cancel();
+  if (response.status === 400 && body.reply_markup) {
+    delete body.reply_markup;
+    try {
+      response = await send();
+      await response.body?.cancel();
+      if (!response.ok) throw new Error(`Alert provider returned HTTP ${response.status}`);
+    } catch (cause) {
+      throw new Error(`Telegram button fallback failed: ${cause instanceof Error ? cause.message : 'Alert delivery failed'}`);
+    }
+  }
   if (!response.ok) throw new Error(`Alert provider returned HTTP ${response.status}`);
 }
 
-async function recordDelivery(env: Env, incident: Incident, send: () => Promise<void>, recovery = false): Promise<void> {
+async function recordDelivery(env: Env, incident: Incident, send: () => Promise<void>, kind: 'opened' | 'recovery' | 'unknown' = 'opened'): Promise<void> {
   let error: string | null = null;
   try { await send(); } catch (cause) { error = (cause instanceof Error ? cause.message : 'Alert delivery failed').slice(0, 1000); }
-  const sql = recovery
+  const sql = kind === 'unknown'
+    ? 'UPDATE incidents SET rerun_unknown_alert_status = ?, rerun_unknown_alert_error = ? WHERE id = ?'
+    : kind === 'recovery'
     ? 'UPDATE incidents SET recovery_notice_status = ?, recovery_notice_error = ? WHERE id = ?'
     : 'UPDATE incidents SET alert_status = ?, alert_error = ? WHERE id = ?';
   await env.DB.prepare(sql).bind(error === null ? 'sent' : 'failed', error, incident.id).run();
@@ -55,5 +68,10 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
   });
 }
 export async function notifyRecovered(env: Env, task: Task, incident: Incident): Promise<void> {
-  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: late heartbeat received`), true);
+  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: late heartbeat received`), 'recovery');
+}
+
+export async function notifyRerunUnknown(env: Env, task: Task, incident: Incident): Promise<void> {
+  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: re-run result unknown`,
+    `${task.name}: The previous re-run request may already have been delivered to the webhook but its result was never recorded. Check whether the task actually ran; no automatic retry.`), 'unknown');
 }

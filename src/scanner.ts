@@ -1,11 +1,33 @@
 import type { Env } from './env';
 import type { Incident, Task } from './models';
 import { previousOccurrence } from './cron';
-import { notifyIncidentOpened } from './alerts';
+import { notifyIncidentOpened, notifyRerunUnknown } from './alerts';
 import { pingToken, randomId, sha256 } from './security';
+
+export const RERUN_RESULT_TIMEOUT_MINUTES = 5;
 
 export async function runScan(env: Env, now: Date): Promise<{ checked: number; opened: number; errors: number }> {
   const summary = { checked: 0, opened: 0, errors: 0 };
+  // Independent sweep also runs when every task is paused or there are no due tasks.
+  try {
+    const cutoff = new Date(now.getTime() - RERUN_RESULT_TIMEOUT_MINUTES * 60000).toISOString();
+    const { results: stale } = await env.DB.prepare("SELECT * FROM incidents WHERE rerun_status = 'requested' AND rerun_requested_at < ? AND rerun_response_code IS NULL AND rerun_error IS NULL").bind(cutoff).all<Incident>();
+    for (const incident of stale) {
+      try {
+        const claimed = await env.DB.prepare("UPDATE incidents SET rerun_status = 'unknown' WHERE id = ? AND rerun_status = 'requested' AND rerun_requested_at < ? AND rerun_response_code IS NULL AND rerun_error IS NULL")
+          .bind(incident.id, cutoff).run();
+        if (claimed.meta.changes !== 1) continue;
+        const task = await env.DB.prepare('SELECT * FROM tasks WHERE id = ?').bind(incident.task_id).first<Task>();
+        if (task) await notifyRerunUnknown(env, task, incident);
+      } catch (error) {
+        summary.errors++;
+        console.error('Rerun timeout incident failed', incident.id, error instanceof Error ? error.message : 'Unknown error');
+      }
+    }
+  } catch (error) {
+    summary.errors++;
+    console.error('Rerun timeout sweep failed', error instanceof Error ? error.message : 'Unknown error');
+  }
   const { results: tasks } = await env.DB.prepare('SELECT * FROM tasks WHERE paused = 0').all<Task>();
   for (const task of tasks) {
     summary.checked++;

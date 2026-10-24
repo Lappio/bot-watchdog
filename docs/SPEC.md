@@ -27,15 +27,17 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
   rerun_webhook_url (nullable, must be https:// except http://localhost / 127.0.0.1 allowed for dev),
   rerun_webhook_secret (nullable; sent as `Authorization: Bearer <secret>` to the webhook),
   ping_token_hash (sha256 hex of the per-task ping token; plain token shown only on create/rotate),
-  paused (0/1), created_at, updated_at, last_heartbeat_at, last_status.
+  paused (0/1), created_at, updated_at, last_heartbeat_at, last_status, schedule_anchor_at (nullable text; migration backfills created_at).
 - heartbeats: id, task_id, received_at, status ('ok'|'fail'), run_id (nullable), output_url (nullable),
-  message (nullable, truncated to 2000 chars). Index on (task_id, received_at).
+  message (nullable, truncated to 2000 chars), dropped_fields (nullable text, JSON array of field names). Index on (task_id, received_at). Partial UNIQUE(task_id, run_id, status) WHERE run_id IS NOT NULL.
 - incidents: id (`inc_`+random), task_id, kind ('missed'|'failed'), expected_at (ISO, the scheduled occurrence; for
-  'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|null),
+  'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|'recovered'|null),
   alert_status ('pending'|'sent'|'failed'), alert_error (original alert delivery only),
   recovery_notice_status (null before attempt, otherwise 'sent'|'failed'), recovery_notice_error,
   rerun_token_hash, rerun_requested_at, rerun_status
-  ('none'|'requested'|'succeeded'|'failed'), rerun_response_code, rerun_error.
+  ('none'|'requested'|'succeeded'|'failed'|'unknown'), rerun_response_code, rerun_error,
+  rerun_unknown_alert_status (nullable 'sent'|'failed'), rerun_unknown_alert_error (nullable text),
+  occurrence_count (integer NOT NULL DEFAULT 1), last_occurrence_at (nullable text), last_reminder_at (nullable text).
   UNIQUE(task_id, kind, expected_at) so the scanner is idempotent.
 All timestamps ISO-8601 UTC strings. Use parameterized queries only.
 
@@ -63,11 +65,15 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
 - Rerun confirm (no admin auth; credential = single-use random token in the alert link):
   `GET /rerun/:incident_id?t=<token>` -> small HTML confirmation page with a POST form button (GET must NEVER trigger the
   webhook: chat/email link previewers prefetch GETs). `POST /rerun/:incident_id` with form field or JSON `t` -> triggers.
-  Idempotent: an atomic conditional UPDATE (`WHERE rerun_requested_at IS NULL`) decides the single winner; only the winner
+  Idempotent: an atomic conditional UPDATE (`WHERE rerun_requested_at IS NULL AND resolved_at IS NULL AND rerun_status = 'none'`) decides the single winner; only the winner
   POSTs the webhook. Repeat confirms return "already requested" page/JSON with current status, never a second POST.
   Webhook request: `POST rerun_webhook_url`, JSON `{ event: "bot-watchdog.rerun", task_id, task_name, incident_id, expected_at }`,
   headers `Content-Type: application/json`, `Idempotency-Key: <incident_id>`, and `Authorization: Bearer <secret>` if set.
   10s timeout. Record response code / error; 2xx -> rerun_status 'succeeded' (incident resolved 'rerun_ok'), else 'failed'.
+  Resolved incidents have no form and POST returns 409 JSON {ok:false,status:<rerun_status>,resolved:true,resolution}
+  (or HTML for form posts). For late_heartbeat the page says "The task already ran on its own (a heartbeat arrived) — no re-run is needed.";
+  rerun_ok says already re-run, recovered says task recovered, other resolutions say already resolved.
+  Unknown results show their status without a button and POST returns 409 without calling the webhook.
   If the task has no webhook, the page says so and nothing is triggered. Never auto-rerun.
 
 ## Scanner (scheduled handler, every minute)
@@ -79,8 +85,19 @@ Only the latest occurrence is checked per scan (no backfill storms after downtim
 Alert content: task name, expected time (UTC + task timezone), grace, last heartbeat time/status, and a
 "Confirm re-run" link to `PUBLIC_BASE_URL/rerun/<incident_id>?t=<token>` (only if the task has a webhook).
 Telegram: `POST https://api.telegram.org/bot<TOKEN>/sendMessage` with `chat_id`, text, and `reply_markup` inline keyboard
-with a URL button "Confirm re-run". Email: Resend `POST https://api.resend.com/emails` with from/to/subject/html+text.
+with a URL button "Confirm re-run" only for https:// confirmation links. The link is always in text.
+For a Telegram HTTP 400 with a button, resend once without reply_markup. Record the final attempt;
+mention the fallback in alert_error only when that fallback fails. Email: Resend `POST https://api.resend.com/emails` with from/to/subject/html+text.
 Scanner must be resilient: one task failing must not stop the others.
+Each scan independently sweeps requested reruns older than RERUN_RESULT_TIMEOUT_MINUTES = 5 with no
+response code or error recorded, even with no active tasks. A conditional UPDATE changes requested to unknown;
+only its winner attempts one alert on the task channel, without a rerun link. The alert explains that the request
+may already have been delivered but its result was never recorded; check whether the task actually ran; no automatic retry.
+Record rerun_unknown_alert_status/error separately. This does not resolve the incident; a later heartbeat
+still resolves missed incidents as late_heartbeat. Isolate the sweep in its own try/catch so task scanning continues.
+Migration 0003_hardening.sql rebuilds incidents preserving all existing columns/data and the unique occurrence key,
+and adds the task/heartbeat columns and partial unique index above. These schema fields reserve later hardening work;
+this run adds no schedule anchoring, dropped-field handling, occurrence aggregation, or reminder behavior.
 
 ## Onboarding snippet (text the user pastes into their bot's task instructions)
 Plain language for an AI agent, e.g.:

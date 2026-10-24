@@ -15,7 +15,7 @@ export async function management(request: Request, env: Env, id?: string, action
     const data = taskInput(await jsonBody(request));
     const token = pingToken();
     const now = new Date().toISOString();
-    const task: Task = { ...data, id: randomId('tsk_'), ping_token_hash: await sha256(token), created_at: now, updated_at: now, last_heartbeat_at: null, last_status: null };
+    const task: Task = { ...data, id: randomId('tsk_'), ping_token_hash: await sha256(token), schedule_anchor_at: null, created_at: now, updated_at: now, last_heartbeat_at: null, last_status: null };
     const keys = Object.keys(task);
     await env.DB.prepare(`INSERT INTO tasks (${keys.join(',')}) VALUES (${keys.map(() => '?').join(',')})`).bind(...Object.values(task)).run();
     return Response.json({ task: publicTask(task), ...credentials(task, env, token) }, { status: 201 });

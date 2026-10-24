@@ -153,7 +153,7 @@ curl -X POST "$BASE/hb/$PING_TOKEN/fail"
 
 Optional `run_id` is a string up to 200 characters; `output_url` is an HTTP(S) URL up to 2000 characters; `message` is a string truncated to 2000 characters. Success → 200 `{"ok":true,"task_id":"tsk_example","received_at":"2026-10-24T01:00:00.000Z"}`. Unknown tokens → 404.
 
-Any heartbeat resolves open missed incidents with `expected_at <= received_at`, with resolution `late_heartbeat`; this includes failure heartbeats. A failure heartbeat also opens a failed incident and attempts an alert immediately. Successful heartbeats do not resolve failed incidents. `run_id` is metadata, not a deduplication key.
+Any heartbeat resolves open missed incidents with `expected_at <= received_at`, with resolution `late_heartbeat`; this includes failure heartbeats. A failure heartbeat also opens a failed incident and attempts an alert immediately. Successful heartbeats do not resolve failed incidents. The database enforces uniqueness of non-null `(task_id, run_id, status)`; repeated inserts currently fail rather than returning an idempotent success. Request-level duplicate handling is reserved for a later fix.
 
 ### Incidents
 
@@ -185,11 +185,13 @@ curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
 }
 ```
 
-Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed` or `failed`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, or `rerun_ok`. Rerun status is `none`, `requested`, `succeeded`, or `failed`.
+Migration 0003 also adds `occurrence_count` (default 1), nullable `last_occurrence_at` and `last_reminder_at`, task `schedule_anchor_at` (existing tasks backfilled from creation), and heartbeat `dropped_fields` (nullable JSON array text). These fields reserve later hardening behavior; aggregation, reminders, schedule anchoring, and dropped-field handling are not implemented in this run.
+
+Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed` or `failed`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, or `recovered`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
 
 ### Confirm a rerun
 
-`GET /rerun/:incident_id?t=<token>` → 200 HTML confirmation page. Use the link in the alert. GET never invokes the webhook. With no webhook configured the page explains that nothing can be triggered.
+`GET /rerun/:incident_id?t=<token>` → 200 HTML confirmation page. Use the link in the alert. GET never invokes the webhook. With no webhook configured the page explains that nothing can be triggered. Resolved incidents show no form: late heartbeats say the task already ran on its own, successful reruns say already re-run, and recovered tasks say they recovered. POST on a resolved incident returns 409 with `{ok:false,status:<rerun_status>,resolved:true,resolution}` (or HTML for a form post). The atomic claim checks that the incident is still unresolved, including when a heartbeat arrives during confirmation. Unknown results also show no button and return 409 on POST.
 
 `POST /rerun/:incident_id` accepts a form field `t` (`application/x-www-form-urlencoded`) or JSON:
 
@@ -244,6 +246,8 @@ Do this even if earlier steps failed.
 Equivalent curl: curl -fsS -m 10 -X POST 'http://localhost:8787/hb/<YOUR_PING_TOKEN>' -H 'Content-Type: application/json' -d '{"status":"ok","run_id":"<any unique id for this run>","output_url":"<link to what you delivered, if any>"}'
 ```
 
+Telegram confirmation links always appear in message text. HTTPS links also get an inline button; the local HTTP default gets a text link only. If Telegram returns HTTP 400 for an alert with a button, delivery retries once without the button. The final attempt determines alert status; a fallback failure is noted in alert_error.
+
 Creation/rotation substitute the real token. For deployment, set `PUBLIC_BASE_URL` to the reachable Worker URL before generating snippets and alerts.
 
 ## Configuration and deployment
@@ -272,13 +276,13 @@ npx wrangler d1 migrations apply DB --remote
 npx wrangler deploy
 ```
 
-Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply migrations too: `0002_recovery_notice.sql` adds the independent recovery delivery fields. For local databases use `npm run db:migrate:local`.
+Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply all migrations too: `0002_recovery_notice.sql` adds recovery delivery fields; `0003_hardening.sql` rebuilds incidents with the expanded status constraints and adds the hardening columns and heartbeat unique index. For local databases use `npm run db:migrate:local`.
 
 ## Security and operational limits
 
 Ping and rerun tokens are random credentials stored as SHA-256 hashes. Admin comparisons use fixed-length digests and constant-time comparison. Webhook secrets are stored in D1 and excluded from public task responses; they are not hashed because they must be sent to the receiver. Protect database access, admin credentials, heartbeat URLs, and confirmation links. URLs can appear in logs and message history. Rotate compromised ping tokens.
 
-Rerun GET requests never trigger execution, so link previews cannot confirm a rerun. The GET heartbeat shortcut does record a heartbeat: prefer POST in bot instructions. Rerun confirmation is single-shot and idempotent even under concurrent submissions. Webhook receivers should also enforce the `Idempotency-Key` header to avoid duplicate work. A crash after claiming a rerun can leave it `requested`; there is no automatic retry.
+Rerun GET requests never trigger execution, so link previews cannot confirm a rerun. The GET heartbeat shortcut does record a heartbeat: prefer POST in bot instructions. Rerun confirmation is single-shot and idempotent even under concurrent submissions. Webhook receivers should also enforce the `Idempotency-Key` header to avoid duplicate work. A crash after claiming a rerun can leave its result unrecorded. Each scheduled scan changes requests older than five minutes with no recorded result to `unknown` and attempts one separate alert, even for paused tasks. The alert has no rerun link: the request may already have reached the webhook, so check whether the task ran. There is no automatic retry. The incident stays open; a later heartbeat resolves a missed incident normally. Delivery is tracked in `rerun_unknown_alert_status/error`.
 
 Monitoring depends on the bot sending a heartbeat; it does not independently verify delivery. Grace is configurable per task. The scanner checks only the latest occurrence whose grace has elapsed, skips occurrences before task creation, and treats any heartbeat at or after that occurrence as evidence of a run. It does not backfill missed runs after downtime. A unique incident key prevents duplicate alerts for the same occurrence; failed deliveries are recorded without automatic retries. Only unpaused tasks are scanned. The task detail API exposes the latest 20 heartbeats; there is no run-history browsing API. This deployment serves one tenant.
 

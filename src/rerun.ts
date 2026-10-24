@@ -5,7 +5,14 @@ import { sha256 } from './security';
 import { jsonBody } from './http';
 
 function page(task: Task, incident: Incident, token: string, message = '', status = 200): Response {
-  const action = !task.rerun_webhook_url ? '<p>No rerun webhook is configured for this task.</p>'
+  const resolvedMessage = incident.resolution === 'late_heartbeat'
+    ? 'The task already ran on its own (a heartbeat arrived) — no re-run is needed.'
+    : incident.resolution === 'rerun_ok' ? 'The task was already re-run — no re-run is needed.'
+    : incident.resolution === 'recovered' ? 'The task recovered — no re-run is needed.'
+    : 'This incident was already resolved — no re-run is needed.';
+  const action = incident.resolved_at ? `<p>${esc(resolvedMessage)}</p>`
+    : incident.rerun_status === 'unknown' ? '<p>The previous re-run result is unknown. Check whether the task actually ran; no automatic retry.</p>'
+    : !task.rerun_webhook_url ? '<p>No rerun webhook is configured for this task.</p>'
     : incident.rerun_requested_at ? '<p>Re-run already requested. This is single-shot; failed requests are not retried automatically.</p>'
     : `<form method="post" action="/rerun/${esc(encodeURIComponent(incident.id))}"><input type="hidden" name="t" value="${esc(token)}"><button type="submit">Confirm re-run</button></form>`;
   return htmlResponse(`<h1>${esc(task.name)}</h1><p>Expected: ${esc(incident.expected_at)}</p><p>Current rerun status: ${esc(incident.rerun_status)}</p>${message ? `<p>${esc(message)}</p>` : ''}${action}`, status);
@@ -32,10 +39,10 @@ export async function rerun(request: Request, env: Env, id: string): Promise<Res
   if (request.method === 'GET') return page(task, incident, token);
   const respond = (current: Incident, ok: boolean, status: number) => wantsHtml
     ? page(task, current, token as string, ok ? 'Re-run succeeded.' : '', status)
-    : Response.json({ ok, status: current.rerun_status }, { status });
-  if (!task.rerun_webhook_url) return respond(incident, false, 409);
+    : Response.json({ ok, status: current.rerun_status, ...(!ok && current.resolved_at ? { resolved: true, resolution: current.resolution } : {}) }, { status });
+  if (!task.rerun_webhook_url || incident.resolved_at || incident.rerun_status === 'unknown') return respond(incident, false, 409);
   // Only the winner of this database claim may make the external request.
-  const claimed = await env.DB.prepare("UPDATE incidents SET rerun_requested_at = ?, rerun_status = 'requested' WHERE id = ? AND rerun_token_hash = ? AND rerun_requested_at IS NULL")
+  const claimed = await env.DB.prepare("UPDATE incidents SET rerun_requested_at = ?, rerun_status = 'requested' WHERE id = ? AND rerun_token_hash = ? AND rerun_requested_at IS NULL AND resolved_at IS NULL AND rerun_status = 'none'")
     .bind(new Date().toISOString(), id, hash).run();
   if (claimed.meta.changes !== 1) {
     const current = await env.DB.prepare('SELECT * FROM incidents WHERE id = ?').bind(id).first<Incident>();

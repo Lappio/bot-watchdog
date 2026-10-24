@@ -109,3 +109,55 @@ it.each([
   // Further heartbeats do not send another recovery notice.
   await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
 });
+it('migration exposes all hardening columns', async () => {
+  for (const [table, columns] of Object.entries({
+    tasks: ['schedule_anchor_at'], heartbeats: ['dropped_fields'],
+    incidents: ['rerun_unknown_alert_status', 'rerun_unknown_alert_error', 'occurrence_count', 'last_occurrence_at', 'last_reminder_at'],
+  })) {
+    const { results } = await env.DB.prepare(`PRAGMA table_info(${table})`).all<any>();
+    expect(results.map(row => row.name)).toEqual(expect.arrayContaining(columns));
+  }
+});
+it('expires stale requested reruns once even with no active tasks, and a heartbeat resolves them', async () => {
+  const t = await task({ paused: 1 });
+  await env.DB.prepare("INSERT INTO incidents (id,task_id,kind,expected_at,opened_at,rerun_status,rerun_requested_at) VALUES ('stale',?,'missed',?,?,'requested',?)").bind(t.id, '2020-01-01T09:00:00.000Z', now.toISOString(), new Date(now.getTime()-6*60000).toISOString()).run();
+  telegram(body => { expect(body.text).toContain('may already have been delivered'); expect(body.text).toContain('no automatic retry'); expect(body.text).not.toContain('/rerun/'); expect(body.reply_markup).toBeUndefined(); });
+  expect(await runScan(scanEnv(), now)).toEqual({ checked: 0, opened: 0, errors: 0 });
+  expect(await env.DB.prepare("SELECT * FROM incidents WHERE id='stale'").first()).toMatchObject({ rerun_status: 'unknown', resolved_at: null, rerun_unknown_alert_status: 'sent', rerun_unknown_alert_error: null });
+  await runScan(scanEnv(), now);
+  telegram();
+  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  expect(await env.DB.prepare("SELECT resolution FROM incidents WHERE id='stale'").first('resolution')).toBe('late_heartbeat');
+});
+it('leaves a recent request untouched', async () => {
+  const t = await task({ paused: 1 });
+  await env.DB.prepare("INSERT INTO incidents (id,task_id,kind,expected_at,opened_at,rerun_status,rerun_requested_at) VALUES ('recent',?,'missed',?,?,'requested',?)").bind(t.id, now.toISOString(), now.toISOString(), new Date(now.getTime()-60000).toISOString()).run();
+  await runScan(scanEnv(), now);
+  expect(await env.DB.prepare("SELECT rerun_status FROM incidents").first('rerun_status')).toBe('requested');
+});
+it('sends HTTP confirmation links as text without a Telegram button', async () => {
+  await task();
+  telegram(body => { expect(body.reply_markup).toBeUndefined(); expect(body.text).toContain('http://localhost:8787/rerun/'); });
+  await runScan({ ...scanEnv(), PUBLIC_BASE_URL: 'http://localhost:8787' }, now);
+  expect(await env.DB.prepare('SELECT alert_status FROM incidents').first('alert_status')).toBe('sent');
+});
+it.each([200, 503])('retries Telegram button rejection once without markup, final response %s', async status => {
+  await task();
+  telegram(body => expect(body.reply_markup).toBeDefined(), 400);
+  telegram(body => { expect(body.reply_markup).toBeUndefined(); expect(body.text).toContain('https://watchdog.test/rerun/'); }, status);
+  await runScan({ ...scanEnv(), PUBLIC_BASE_URL: 'https://watchdog.test' }, now);
+  expect(await env.DB.prepare('SELECT alert_status,alert_error FROM incidents').first()).toMatchObject({ alert_status: status === 200 ? 'sent' : 'failed', alert_error: status === 200 ? null : expect.stringContaining('fallback') });
+});
+it.each([200, 503])('concurrent timeout sweeps attempt one alert and record its final result %s', async status => {
+  const t = await task({ paused: 1 });
+  await env.DB.prepare("INSERT INTO incidents (id,task_id,kind,expected_at,opened_at,rerun_status,rerun_requested_at) VALUES ('stale',?,'missed',?,?,'requested',?)")
+    .bind(t.id, now.toISOString(), now.toISOString(), new Date(now.getTime() - 6*60000).toISOString()).run();
+  telegram(undefined, status);
+  await Promise.all([runScan(scanEnv(), now), runScan(scanEnv(), now)]);
+  expect(await env.DB.prepare("SELECT * FROM incidents WHERE id='stale'").first()).toMatchObject({
+    rerun_status: 'unknown', resolved_at: null, alert_status: 'pending', alert_error: null,
+    rerun_unknown_alert_status: status === 200 ? 'sent' : 'failed',
+    rerun_unknown_alert_error: status === 200 ? null : 'Alert provider returned HTTP 503',
+  });
+  await runScan(scanEnv(), now);
+});
