@@ -110,7 +110,7 @@ curl "$BASE/api/tasks/$TASK_ID" -H "Authorization: Bearer $ADMIN_TOKEN"
 
 `GET /api/tasks` → 200 `{"tasks":[<public task>]}`, newest creation first.
 
-`GET /api/tasks/:id` → 200 `{"task":<public task>,"recent_heartbeats":[],"open_incidents":[]}`. Includes the latest 20 heartbeats, newest first, and unresolved incidents. Heartbeat rows contain `id`, `task_id`, `received_at`, `status`, `run_id`, `output_url`, and `message`; optional values are null.
+`GET /api/tasks/:id` → 200 `{"task":<public task>,"recent_heartbeats":[],"open_incidents":[]}`. Includes the latest 20 heartbeats, newest first, and unresolved incidents. Heartbeat rows contain `id`, `task_id`, `received_at`, `status`, `run_id`, `output_url`, `message`, and `dropped_fields`; optional values are null. `dropped_fields` is stored as JSON array text when fields were dropped.
 
 ### Update and delete tasks
 
@@ -151,9 +151,13 @@ curl -X POST "$BASE/hb/$PING_TOKEN/fail"
 - `GET /hb/:ping_token`: no-body success shortcut; it records a heartbeat.
 - `POST /hb/:ping_token/fail`: no-body failure shortcut; forces `fail` even if a supplied JSON body says `ok`.
 
-Optional `run_id` is a string up to 200 characters; `output_url` is an HTTP(S) URL up to 2000 characters; `message` is a string truncated to 2000 characters. Success → 200 `{"ok":true,"task_id":"tsk_example","received_at":"2026-10-24T01:00:00.000Z"}`. Unknown tokens → 404.
+Optional `run_id` is a string up to 200 characters; `output_url` is an HTTP(S) URL up to 2000 characters; `message` is a string truncated to 2000 characters. Invalid optional values are dropped and stored as null, for both success and failure heartbeats. Their names are stored in `heartbeats.dropped_fields` as JSON array text and returned as `dropped_fields`, for example `{"ok":true,"task_id":"tsk_example","received_at":"2026-10-24T01:00:00.000Z","dropped_fields":["output_url"]}`. When none are dropped, the response omits this field. Invalid JSON, non-object bodies, and invalid `status` still return 400. Unknown tokens return 404.
 
-Any heartbeat resolves open missed incidents with `expected_at <= received_at`, with resolution `late_heartbeat`; this includes failure heartbeats. A failure heartbeat also opens a failed incident and attempts an alert immediately. Successful heartbeats do not resolve failed incidents. The database enforces uniqueness of non-null `(task_id, run_id, status)`; repeated inserts currently fail rather than returning an idempotent success. Request-level duplicate handling is reserved for a later fix.
+Success → 200 `{"ok":true,"task_id":"tsk_example","received_at":"2026-10-24T01:00:00.000Z"}` after database writes complete. Alerts and recovery notices run in `ctx.waitUntil(...)`; the response does not wait for providers. Delivery results are recorded asynchronously on the incident.
+
+A repeated non-null `(task_id, run_id, status)` within the current schedule period returns 200 `{"ok":true,"duplicate":true,"task_id":"tsk_example","received_at":"2026-10-24T01:00:00.000Z"}` with the most recent matching receipt time. The period starts at the latest scheduled occurrence at or before receipt time in the task timezone; if none exists, a rolling 10-minute window applies. The same run ID in a later period records a new heartbeat. Run IDs are optional and, if supplied, should be unique per run (for example, include the date/time). Concurrent duplicates are safe: they add no heartbeat, task update, incident occurrence, or notification. The same run can report both `fail` and `ok`; omitted or dropped run IDs are not deduplicated.
+
+Any new heartbeat resolves open missed incidents with `expected_at <= received_at`, with resolution `late_heartbeat`; this includes failure heartbeats. A failure heartbeat opens a failed incident and queues an alert. While a failed incident remains open, additional failures increment its `occurrence_count` and set `last_occurrence_at`, without another incident or alert. Failures leave failed incidents open. An `ok` heartbeat resolves open failed incidents with `resolution: "recovered"` and `resolved_at`, and queues a notice saying "recovered: an ok heartbeat was received after a failure". Its delivery is tracked separately in `recovery_notice_status/error`.
 
 ### Incidents
 
@@ -185,7 +189,7 @@ curl "$BASE/api/incidents?status=all" -H "Authorization: Bearer $ADMIN_TOKEN"
 }
 ```
 
-Migration 0003 also adds `occurrence_count` (default 1), nullable `last_occurrence_at` and `last_reminder_at`, task `schedule_anchor_at` (existing tasks backfilled from creation), and heartbeat `dropped_fields` (nullable JSON array text). These fields reserve later hardening behavior; aggregation, reminders, schedule anchoring, and dropped-field handling are not implemented in this run.
+Migration 0003 also adds `occurrence_count` (default 1), nullable `last_occurrence_at` and `last_reminder_at`, task `schedule_anchor_at` (existing tasks backfilled from creation), and heartbeat `dropped_fields` (nullable JSON array text). Failed incidents aggregate occurrences, and heartbeat ingestion records dropped optional fields. Reminders and schedule anchoring remain reserved for later work.
 
 Incident endpoints return stored rows, including the rerun token hash, never its plaintext. `kind` is `missed` or `failed`; failed incidents use heartbeat receipt time as `expected_at`. Original alert status is `pending`, `sent`, or `failed`. Recovery notice status starts null and becomes `sent` or `failed`, with a separate error; it never overwrites the original alert result. Resolution is null, `late_heartbeat`, `rerun_ok`, or `recovered`. Rerun status is `none`, `requested`, `succeeded`, `failed`, or `unknown`.
 
@@ -231,7 +235,7 @@ Rerun endpoints have distinct responses: missing incident/task → 404 HTML, mis
 
 ## Onboarding paste snippet
 
-Example output from `GET /api/tasks/:id/snippet` for the daily report above:
+Example output from `GET /api/tasks/:id/snippet` for the daily report above (replace `<YOUR_PING_TOKEN>` before executing; create/rotate return runnable examples with the real token):
 
 ```text
 Task: Daily report
@@ -240,10 +244,11 @@ Grace: 15 minutes
 
 At the very end of every run of this task (after you've delivered the result), send an HTTP POST to
 http://localhost:8787/hb/<YOUR_PING_TOKEN>
-with JSON body {"status":"ok","run_id":"<any unique id for this run>","output_url":"<link to what you delivered, if any>"}. Omit output_url if there is no link.
+with JSON body {"status":"ok"}. Optional run_id, if used, must be unique per run (for example, include the date/time); optional output_url is an HTTP(S) link to what you delivered; optional message is a short explanation. Replace any placeholders in the prose with your actual values.
 If the task failed or you could not deliver, send the same request with "status":"fail" and a short "message", or POST to http://localhost:8787/hb/<YOUR_PING_TOKEN>/fail.
 Do this even if earlier steps failed.
-Equivalent curl: curl -fsS -m 10 -X POST 'http://localhost:8787/hb/<YOUR_PING_TOKEN>' -H 'Content-Type: application/json' -d '{"status":"ok","run_id":"<any unique id for this run>","output_url":"<link to what you delivered, if any>"}'
+Equivalent curl: curl -fsS -m 10 -X POST 'http://localhost:8787/hb/<YOUR_PING_TOKEN>' -H 'Content-Type: application/json' -d '{"status":"ok"}'
+Failure curl: curl -fsS -m 10 -X POST 'http://localhost:8787/hb/<YOUR_PING_TOKEN>' -H 'Content-Type: application/json' -d '{"status":"fail","message":"short reason"}'
 ```
 
 Telegram confirmation links always appear in message text. HTTPS links also get an inline button; the local HTTP default gets a text link only. If Telegram returns HTTP 400 for an alert with a button, delivery retries once without the button. The final attempt determines alert status; a fallback failure is noted in alert_error.
@@ -276,7 +281,7 @@ npx wrangler d1 migrations apply DB --remote
 npx wrangler deploy
 ```
 
-Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply all migrations too: `0002_recovery_notice.sql` adds recovery delivery fields; `0003_hardening.sql` rebuilds incidents with the expanded status constraints and adds the hardening columns and heartbeat unique index. For local databases use `npm run db:migrate:local`.
+Set only the provider secrets you use. The cron trigger is already configured for every minute. Existing installations must apply all migrations too: `0002_recovery_notice.sql` adds recovery delivery fields; `0003_hardening.sql` rebuilds incidents with the expanded status constraints and adds the hardening columns and initial heartbeat unique index; `0004_heartbeat_dedup_window.sql` replaces that index with a non-unique index for schedule-period deduplication. For local databases use `npm run db:migrate:local`.
 
 ## Security and operational limits
 

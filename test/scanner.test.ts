@@ -1,4 +1,4 @@
-import { env, fetchMock, createScheduledController, createExecutionContext } from 'cloudflare:test';
+import { env, fetchMock, createScheduledController, createExecutionContext, waitOnExecutionContext } from 'cloudflare:test';
 import { afterEach, expect, it } from 'vitest';
 import worker from '../src/index';
 import { runScan } from '../src/scanner';
@@ -9,6 +9,12 @@ async function task(overrides: Record<string, unknown> = {}) {
   const row = { id: crypto.randomUUID(), name: 'Report <script> & "team"', schedule: '0 9 * * *', timezone: 'UTC', grace_minutes: 15, alert_channel: 'telegram', alert_target: '123', rerun_webhook_url: 'https://hooks.example/run', created_at: '2026-10-24T08:00:00.000Z', paused: 0, ...overrides };
   await env.DB.prepare(`INSERT INTO tasks (id,name,schedule,timezone,grace_minutes,alert_channel,alert_target,rerun_webhook_url,created_at,updated_at,ping_token_hash,paused) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`).bind(row.id,row.name,row.schedule,row.timezone,row.grace_minutes,row.alert_channel,row.alert_target,row.rerun_webhook_url,row.created_at,row.created_at,await sha256(row.id),row.paused).run();
   return row;
+}
+async function heartbeatFetch(request: Request<unknown, IncomingRequestCfProperties>, environment = scanEnv()) {
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(request, environment, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
 }
 const scanEnv = () => ({ ...env, TELEGRAM_BOT_TOKEN: 'test-telegram-token', RESEND_API_KEY: 'test-resend-key' });
 function telegram(check: (body: any) => void = () => {}, status = 200) {
@@ -55,12 +61,13 @@ it('immediately alerts on failure and sends a late recovery notice', async () =>
   const t = await task(); let url = '';
   telegram(body => { expect(body.text).toContain('reported failure'); expect(body.text).toContain('broken <job>'); expect(body.text).toContain('fail'); url = body.reply_markup.inline_keyboard[0][0].url; });
   const request = new Request<unknown, IncomingRequestCfProperties>(`https://watchdog.test/hb/${t.id}`, { method: 'POST', body: JSON.stringify({ status: 'fail', message: 'broken <job>' }) });
-  expect((await worker.fetch(request, scanEnv(), createExecutionContext())).status).toBe(200);
+  expect((await heartbeatFetch(request)).status).toBe(200);
   const incident = await env.DB.prepare("SELECT * FROM incidents WHERE kind='failed'").first<any>();
   expect(incident.rerun_token_hash).toBe(await sha256(new URL(url).searchParams.get('t')!));
   await env.DB.prepare("INSERT INTO incidents (id,task_id,kind,expected_at,opened_at) VALUES ('late',?,'missed',?,?)").bind(t.id,'2020-01-01T00:00:00.000Z','2020-01-01T00:00:00.000Z').run();
   telegram(body => { expect(body.text).toContain('recovered: late heartbeat received'); expect(body.reply_markup).toBeUndefined(); });
-  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  telegram(body => { expect(body.text).toContain('recovered: an ok heartbeat was received after a failure'); });
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
   expect(await env.DB.prepare("SELECT resolution FROM incidents WHERE id='late'").first('resolution')).toBe('late_heartbeat');
 });
 it('isolates a broken task and scans the remaining task', async () => {
@@ -98,7 +105,7 @@ it.each([
   expect(before.recovery_notice_status).toBeNull();
   expect(before.recovery_notice_error).toBeNull();
   telegram(undefined, recovery);
-  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
   const after = await env.DB.prepare('SELECT * FROM incidents').first<any>();
   expect(after).toMatchObject({
     alert_status: before.alert_status, alert_error: before.alert_error,
@@ -107,7 +114,7 @@ it.each([
     recovery_notice_error: recovery === 200 ? null : 'Alert provider returned HTTP 503',
   });
   // Further heartbeats do not send another recovery notice.
-  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
 });
 it('migration exposes all hardening columns', async () => {
   for (const [table, columns] of Object.entries({
@@ -126,7 +133,7 @@ it('expires stale requested reruns once even with no active tasks, and a heartbe
   expect(await env.DB.prepare("SELECT * FROM incidents WHERE id='stale'").first()).toMatchObject({ rerun_status: 'unknown', resolved_at: null, rerun_unknown_alert_status: 'sent', rerun_unknown_alert_error: null });
   await runScan(scanEnv(), now);
   telegram();
-  await worker.fetch(new Request(`https://watchdog.test/hb/${t.id}`), scanEnv(), createExecutionContext());
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`));
   expect(await env.DB.prepare("SELECT resolution FROM incidents WHERE id='stale'").first('resolution')).toBe('late_heartbeat');
 });
 it('leaves a recent request untouched', async () => {
@@ -160,4 +167,40 @@ it.each([200, 503])('concurrent timeout sweeps attempt one alert and record its 
     rerun_unknown_alert_error: status === 200 ? null : 'Alert provider returned HTTP 503',
   });
   await runScan(scanEnv(), now);
+});
+it('returns before slow Telegram completes and deduplicates concurrent runs and open failures', async () => {
+  const t = await task({ rerun_webhook_url: null });
+  let completed = false;
+  fetchMock.get('https://api.telegram.org').intercept({ path: '/bottest-telegram-token/sendMessage', method: 'POST' })
+    .reply(200, () => { completed = true; return '{}'; }).delay(300);
+  const ctx = createExecutionContext();
+  const request = () => new Request<unknown, IncomingRequestCfProperties>(`https://watchdog.test/hb/${t.id}`, { method: 'POST', body: JSON.stringify({ status: 'fail', run_id: 'same' }) });
+  const responses = await Promise.all([worker.fetch(request(), scanEnv(), ctx), worker.fetch(request(), scanEnv(), ctx)]);
+  expect(responses.map(r => r.status)).toEqual([200, 200]);
+  // Delivery is pending when both responses are available.
+  expect(await env.DB.prepare('SELECT alert_status FROM incidents').first('alert_status')).toBe('pending');
+  const bodies = await Promise.all(responses.map(r => r.json<any>()));
+  expect(bodies.filter(b => b.duplicate)).toHaveLength(1);
+  expect(bodies[0].received_at).toBe(bodies[1].received_at);
+  expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM heartbeats').first('n')).toBe(1);
+  await waitOnExecutionContext(ctx);
+  expect(completed).toBe(true);
+  expect(await env.DB.prepare('SELECT alert_status FROM incidents').first('alert_status')).toBe('sent');
+  // No further interceptor: any extra alert would fail delivery and the assertions below.
+  for (const body of [{ status: 'fail', run_id: 'other' }, {}, {}]) {
+    await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}/fail`, { method: 'POST', body: JSON.stringify(body) }));
+  }
+  expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents').first('n')).toBe(1);
+  expect(await env.DB.prepare('SELECT * FROM incidents').first()).toMatchObject({ occurrence_count: 4, last_occurrence_at: expect.any(String), resolved_at: null, alert_status: 'sent' });
+  telegram(body => expect(body.text).toContain('recovered: an ok heartbeat was received after a failure'));
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}`, { method: 'POST', body: JSON.stringify({ run_id: 'same', status: 'ok' }) }));
+  expect(await env.DB.prepare('SELECT * FROM incidents').first()).toMatchObject({ resolution: 'recovered', resolved_at: expect.any(String), recovery_notice_status: 'sent', recovery_notice_error: null });
+  const before = await env.DB.prepare('SELECT last_status FROM tasks WHERE id = ?').bind(t.id).first('last_status');
+  const duplicate = await heartbeatFetch(request());
+  expect(await duplicate.json()).toMatchObject({ duplicate: true });
+  expect(await env.DB.prepare('SELECT last_status FROM tasks WHERE id = ?').bind(t.id).first('last_status')).toBe(before);
+  // A new failure after recovery opens a fresh incident.
+  telegram();
+  await heartbeatFetch(new Request(`https://watchdog.test/hb/${t.id}/fail`, { method: 'POST' }));
+  expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM incidents WHERE resolved_at IS NULL').first('n')).toBe(1);
 });

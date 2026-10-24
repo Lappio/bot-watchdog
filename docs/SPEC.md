@@ -29,7 +29,7 @@ survives platform pauses/rate limits. Single-tenant MVP (one operator per deploy
   ping_token_hash (sha256 hex of the per-task ping token; plain token shown only on create/rotate),
   paused (0/1), created_at, updated_at, last_heartbeat_at, last_status, schedule_anchor_at (nullable text; migration backfills created_at).
 - heartbeats: id, task_id, received_at, status ('ok'|'fail'), run_id (nullable), output_url (nullable),
-  message (nullable, truncated to 2000 chars), dropped_fields (nullable text, JSON array of field names). Index on (task_id, received_at). Partial UNIQUE(task_id, run_id, status) WHERE run_id IS NOT NULL.
+  message (nullable, truncated to 2000 chars), dropped_fields (nullable text, JSON array of field names). Index on (task_id, received_at). Non-unique index on (task_id, run_id, status, received_at).
 - incidents: id (`inc_`+random), task_id, kind ('missed'|'failed'), expected_at (ISO, the scheduled occurrence; for
   'failed' use the heartbeat time), opened_at, resolved_at (nullable), resolution ('late_heartbeat'|'rerun_ok'|'recovered'|null),
   alert_status ('pending'|'sent'|'failed'), alert_error (original alert delivery only),
@@ -61,7 +61,19 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
   -> 200 `{ ok: true, task_id, received_at }`; 404 on unknown token. Updates task.last_heartbeat_at/last_status.
   A heartbeat resolves any open 'missed' incident of that task whose expected_at <= received_at (resolution 'late_heartbeat')
   and sends a short "recovered (late)" notice on the task's channel. A status 'fail' heartbeat opens a 'failed' incident
-  and alerts immediately.
+  and queues an alert via ctx.waitUntil; all heartbeat database writes finish before responding, without waiting for delivery.
+  Optional run_id must be a string <=200 characters; output_url an HTTP(S) URL <=2000 characters;
+  message a string truncated to 2000 characters. Invalid optional values are dropped to null for either status,
+  stored as JSON array text in heartbeats.dropped_fields, and returned as dropped_fields: [names] (omit when empty).
+  Invalid JSON/non-object bodies and invalid status still return 400; empty bodies remain accepted.
+  For non-null run_id, deduplicate (task_id, run_id, status) only against heartbeats received at or after previousOccurrence(schedule, timezone, now), the latest scheduled occurrence at/before now; use a rolling 10-minute window if none exists. A single INSERT ... SELECT ... WHERE NOT EXISTS statement starts the atomic batch, with a fresh row ID gating all side effects. Reusing a run_id in a later schedule period records a new heartbeat.
+  Duplicates return 200 {ok:true, duplicate:true, task_id, received_at:<original time>} with no side effects.
+  All incident/task mutations must be gated on insertion of the heartbeat, including concurrent requests.
+  While an open failed incident exists, new failures increment occurrence_count and set last_occurrence_at
+  without another incident or alert. Fail heartbeats never resolve failed incidents.
+  An ok heartbeat resolves open failed incidents with resolution recovered and resolved_at, and queues
+  "recovered: an ok heartbeat was received after a failure". Record recovery_notice_status/error separately.
+  Missed-incident recovery notices also run via ctx.waitUntil. Tests asserting delivery must await the execution context.
 - Rerun confirm (no admin auth; credential = single-use random token in the alert link):
   `GET /rerun/:incident_id?t=<token>` -> small HTML confirmation page with a POST form button (GET must NEVER trigger the
   webhook: chat/email link previewers prefetch GETs). `POST /rerun/:incident_id` with form field or JSON `t` -> triggers.
@@ -96,15 +108,18 @@ may already have been delivered but its result was never recorded; check whether
 Record rerun_unknown_alert_status/error separately. This does not resolve the incident; a later heartbeat
 still resolves missed incidents as late_heartbeat. Isolate the sweep in its own try/catch so task scanning continues.
 Migration 0003_hardening.sql rebuilds incidents preserving all existing columns/data and the unique occurrence key,
-and adds the task/heartbeat columns and partial unique index above. These schema fields reserve later hardening work;
-this run adds no schedule anchoring, dropped-field handling, occurrence aggregation, or reminder behavior.
+and adds the task/heartbeat columns and initial partial unique index. Migration 0004 replaces that index with the non-unique heartbeat lookup index for schedule-period deduplication. Heartbeat dropped-field handling and failed-incident occurrence aggregation use these fields.
+Schedule anchoring and reminders remain reserved for later work.
 
 ## Onboarding snippet (text the user pastes into their bot's task instructions)
-Plain language for an AI agent, e.g.:
-"At the very end of every run of this task (after you've delivered the result), send an HTTP POST to
-<heartbeat_url> with JSON body {"status":"ok","run_id":"<any unique id for this run>","output_url":"<link to what you delivered, if any>"}.
-If the task failed or you could not deliver, send the same request with "status":"fail" and a short "message".
-Do this even if earlier steps failed. Equivalent curl: curl -fsS -m 10 -X POST <heartbeat_url> -H 'Content-Type: application/json' -d '{...}'"
+Plain language tells the agent to POST at the end of every run, even after a failure, after delivering the result.
+Explain optional run_id (unique for each run), output_url (HTTP(S) delivery link), and message (short reason),
+and explicitly tell the agent to replace placeholders in prose. Runnable curl examples from create/rotate use
+actual heartbeat URLs and literal JSON bodies {"status":"ok"} and
+{"status":"fail","message":"short reason"}; neither body contains placeholders.
+Use curl -fsS -m 10 -X POST with Content-Type: application/json and a shell-quoted -d body.
+GET snippet substitutes <YOUR_PING_TOKEN> because the plaintext token is unavailable; replace it before execution.
+JSON containing placeholders must never be labelled copy-pasteable.
 Include task name, schedule, and grace in the snippet header.
 
 ## Testing rules

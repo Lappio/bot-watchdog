@@ -7,7 +7,7 @@ import { HttpError, jsonError } from './http';
 import { requireAdmin } from './security';
 
 export default {
-  async fetch(request, env, _ctx): Promise<Response> {
+  async fetch(request, env, ctx): Promise<Response> {
     try {
       const path = new URL(request.url).pathname;
       if (request.method === 'GET' && path === '/healthz') return Response.json({ ok: true });
@@ -28,7 +28,7 @@ export default {
       if (confirm) return await rerun(request, env, confirm[1]);
       const hb = /^\/hb\/([^/]+)(\/fail)?$/.exec(path);
       if (hb && (request.method === 'POST' || (request.method === 'GET' && !hb[2]))) {
-        return await heartbeat(request, env, hb[1], Boolean(hb[2]));
+        return await heartbeat(request, env, hb[1], Boolean(hb[2]), ctx);
       }
       return jsonError(404, 'not_found', 'Not found');
     } catch (error) {

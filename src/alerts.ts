@@ -68,7 +68,7 @@ export async function notifyIncidentOpened(env: Env, task: Task, incident: Incid
   });
 }
 export async function notifyRecovered(env: Env, task: Task, incident: Incident): Promise<void> {
-  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: late heartbeat received`), 'recovery');
+  await recordDelivery(env, incident, () => deliver(env, task, `${task.name}: recovered`, `${task.name}: recovered: ${incident.resolution === 'recovered' ? 'an ok heartbeat was received after a failure' : 'late heartbeat received'}`), 'recovery');
 }
 
 export async function notifyRerunUnknown(env: Env, task: Task, incident: Incident): Promise<void> {

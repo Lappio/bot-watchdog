@@ -1,11 +1,14 @@
-import { env, SELF, createExecutionContext, fetchMock } from 'cloudflare:test';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { env, SELF, createExecutionContext, waitOnExecutionContext, fetchMock } from 'cloudflare:test';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
+import * as cron from '../src/cron';
 import { sha256 } from '../src/security';
 
 beforeEach(() => {
   fetchMock.get('https://api.resend.com').intercept({ path: '/emails', method: 'POST' }).reply(200, '{}').persist();
 });
+
+afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 const base = 'https://watchdog.test';
 const valid = { name: 'Daily report', schedule: '0 9 * * *', timezone: 'Asia/Shanghai', alert_channel: 'email', alert_target: 'me@example.com' };
@@ -18,7 +21,10 @@ async function create(overrides = {}) {
   return await response.json<any>();
 }
 async function ping(token: string, method = 'POST', body?: unknown, suffix = '') {
-  return SELF.fetch(`${base}/hb/${token}${suffix}`, { method, body: body === undefined ? undefined : JSON.stringify(body) });
+  const ctx = createExecutionContext();
+  const response = await worker.fetch(new Request(`${base}/hb/${token}${suffix}`, { method, body: body === undefined ? undefined : JSON.stringify(body) }), env, ctx);
+  await waitOnExecutionContext(ctx);
+  return response;
 }
 
 describe('management', () => {
@@ -123,9 +129,88 @@ describe('heartbeats', () => {
     expect(detail.open_incidents.length).toBeGreaterThanOrEqual(1);
     expect(detail.open_incidents.every((i: any) => i.kind === 'failed' && i.expected_at === i.opened_at && i.alert_status === 'sent')).toBe(true);
   });
-  it.each([{ status: 'bad' }, { run_id: 'x'.repeat(201) }, { output_url: 'ftp://example.com' }, { output_url: 'https://example.com/' + 'x'.repeat(2000) }, { message: 42 }])('validates heartbeat %j', async body => {
+  it('rejects invalid status, malformed JSON and nonobject bodies', async () => {
     const { ping_token } = await create();
-    expect((await ping(ping_token, 'POST', body)).status).toBe(400);
+    for (const body of ['{', '[]', 'null', '42', '{"status":"bad"}', '{"status":null}']) {
+      expect((await SELF.fetch(`${base}/hb/${ping_token}`, { method: 'POST', body })).status).toBe(400);
+    }
+  });
+  it.each([
+    { status: 'fail', output_url: 'ftp://example.com', field: 'output_url' },
+    { status: 'ok', run_id: 'x'.repeat(201), field: 'run_id' },
+    { status: 'ok', run_id: 42, field: 'run_id' },
+    { status: 'fail', output_url: 'https://example.com/' + 'x'.repeat(2000), field: 'output_url' },
+    { status: 'fail', message: 42, field: 'message' },
+  ])('drops invalid optional field $field for $status', async ({ field, ...body }) => {
+    const { task, ping_token } = await create();
+    const response = await ping(ping_token, 'POST', body);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ dropped_fields: [field] });
+    const row = await env.DB.prepare('SELECT * FROM heartbeats WHERE task_id = ?').bind(task.id).first<any>();
+    expect(row).toMatchObject({ status: body.status, [field]: null, dropped_fields: JSON.stringify([field]) });
+    if (body.status === 'fail') expect(await env.DB.prepare('SELECT kind FROM incidents WHERE task_id = ? AND resolved_at IS NULL').bind(task.id).first('kind')).toBe('failed');
+  });
+  it('executes both generated curl examples verbatim', async () => {
+    const { snippet, task } = await create();
+    const lines = snippet.split('\n').filter((line: string) => line.includes('curl -fsS'));
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      const url = /-X POST '([^']+)'/.exec(line)![1];
+      const body = /-d '([^']+)'/.exec(line)![1];
+      expect(JSON.parse(body)).not.toHaveProperty('run_id');
+      expect((await SELF.fetch(base + new URL(url).pathname, { method: 'POST', body })).status).toBe(200);
+    }
+    expect((await env.DB.prepare('SELECT status FROM heartbeats WHERE task_id = ? ORDER BY status').bind(task.id).all()).results).toEqual([{ status: 'fail' }, { status: 'ok' }]);
+  });
+  it('records the snippet ok example in two different schedule periods', async () => {
+    const { snippet, task } = await create({ timezone: 'UTC' });
+    const line = snippet.split('\n').find((line: string) => line.startsWith('Equivalent curl:'))!;
+    const url = /-X POST '([^']+)'/.exec(line)![1];
+    const body = /-d '([^']+)'/.exec(line)![1];
+    expect(JSON.parse(body)).toEqual({ status: 'ok' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    for (const time of ['2026-10-24T09:01:00Z', '2026-10-25T09:01:00Z']) {
+      vi.setSystemTime(new Date(time));
+      const ctx = createExecutionContext();
+      const response = await worker.fetch(new Request(url, { method: 'POST', body }), env, ctx);
+      await waitOnExecutionContext(ctx);
+      expect(response.status).toBe(200);
+      expect(await response.json()).not.toHaveProperty('duplicate');
+    }
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM heartbeats WHERE task_id = ?').bind(task.id).first('n')).toBe(2);
+  });
+  it('deduplicates within a period but records a reused run ID at the next occurrence and resolves its missed incident', async () => {
+    const { task, ping_token } = await create({ timezone: 'Asia/Shanghai' });
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-24T01:00:00Z'));
+    const original = await (await ping(ping_token, 'POST', { run_id: 'same' })).json<any>();
+    const expected = '2026-10-25T01:00:00.000Z';
+    await env.DB.prepare("INSERT INTO incidents (id, task_id, kind, expected_at, opened_at) VALUES ('later', ?, 'missed', ?, ?)").bind(task.id, expected, expected).run();
+    vi.setSystemTime(new Date('2026-10-25T00:59:59Z'));
+    expect(await (await ping(ping_token, 'POST', { run_id: 'same' })).json()).toMatchObject({ duplicate: true, received_at: original.received_at });
+    expect(await env.DB.prepare('SELECT last_heartbeat_at FROM tasks WHERE id = ?').bind(task.id).first('last_heartbeat_at')).toBe(original.received_at);
+    expect(await env.DB.prepare("SELECT resolved_at FROM incidents WHERE id = 'later'").first('resolved_at')).toBeNull();
+    vi.setSystemTime(new Date(expected));
+    const response = await ping(ping_token, 'POST', { run_id: 'same' });
+    expect(response.status).toBe(200);
+    expect(await response.json()).not.toHaveProperty('duplicate');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM heartbeats WHERE task_id = ?').bind(task.id).first('n')).toBe(2);
+    expect(await env.DB.prepare("SELECT resolution, resolved_at FROM incidents WHERE id = 'later'").first()).toMatchObject({ resolution: 'late_heartbeat', resolved_at: expected });
+    expect(await (await ping(ping_token, 'POST', { run_id: 'same' })).json()).toMatchObject({ duplicate: true, received_at: expected });
+    for (let i = 0; i < 2; i++) expect(await (await ping(ping_token, 'POST', {})).json()).not.toHaveProperty('duplicate');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM heartbeats WHERE task_id = ?').bind(task.id).first('n')).toBe(4);
+  });
+  it('uses a ten-minute dedup window when the schedule has no occurrence', async () => {
+    const { task, ping_token } = await create({ timezone: 'UTC' });
+    vi.spyOn(cron, 'previousOccurrence').mockReturnValue(null);
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-24T09:00:00Z'));
+    const original = await (await ping(ping_token, 'POST', { run_id: 'same' })).json<any>();
+    vi.setSystemTime(new Date('2026-10-24T09:10:00Z'));
+    expect(await (await ping(ping_token, 'POST', { run_id: 'same' })).json()).toMatchObject({ duplicate: true, received_at: original.received_at });
+    vi.setSystemTime(new Date('2026-10-24T09:10:00.001Z'));
+    expect(await (await ping(ping_token, 'POST', { run_id: 'same' })).json()).not.toHaveProperty('duplicate');
+    expect(await env.DB.prepare('SELECT COUNT(*) AS n FROM heartbeats WHERE task_id = ?').bind(task.id).first('n')).toBe(2);
   });
   it('returns 404 for unknown credentials', async () => { expect((await ping('unknown')).status).toBe(404); });
   it('resolves only eligible missed incidents and retains latest twenty heartbeats', async () => {
@@ -137,7 +222,7 @@ describe('heartbeats', () => {
     const detail = await (await api(`/${task.id}`)).json<any>();
     expect(detail.recent_heartbeats).toHaveLength(20);
     expect(detail.recent_heartbeats[0].run_id).toBe('20');
-    expect(detail.open_incidents.map((i: any) => i.id).sort()).toEqual(['failure', 'future']);
+    expect(detail.open_incidents.map((i: any) => i.id).sort()).toEqual(['future']);
     expect(await env.DB.prepare('SELECT resolution, resolved_at FROM incidents WHERE id = ?').bind('past').first()).toMatchObject({ resolution: 'late_heartbeat', resolved_at: expect.any(String) });
   });
 });
