@@ -1,6 +1,6 @@
 import type { Env } from './env';
 import { HttpError, jsonBody } from './http';
-import { type Task, publicTask } from './models';
+import { type Task, type Incident, publicTask, publicIncident } from './models';
 import { pingToken, randomId, sha256 } from './security';
 import { generateSnippet, heartbeatUrl } from './snippet';
 import { taskInput } from './validation';
@@ -35,9 +35,9 @@ export async function management(request: Request, env: Env, id?: string, action
   if (method === 'GET') {
     const [heartbeats, incidents] = await Promise.all([
       env.DB.prepare('SELECT * FROM heartbeats WHERE task_id = ? ORDER BY received_at DESC, rowid DESC LIMIT 20').bind(id).all(),
-      env.DB.prepare('SELECT * FROM incidents WHERE task_id = ? AND resolved_at IS NULL ORDER BY opened_at DESC').bind(id).all(),
+      env.DB.prepare('SELECT * FROM incidents WHERE task_id = ? AND resolved_at IS NULL ORDER BY opened_at DESC').bind(id).all<Incident>(),
     ]);
-    return Response.json({ task: publicTask(task), recent_heartbeats: heartbeats.results, open_incidents: incidents.results });
+    return Response.json({ task: publicTask(task), recent_heartbeats: heartbeats.results, open_incidents: incidents.results.map(publicIncident) });
   }
   if (method === 'PATCH') {
     const data = { ...taskInput(await jsonBody(request), task), updated_at: new Date().toISOString() };

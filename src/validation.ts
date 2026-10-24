@@ -7,9 +7,10 @@ export function httpUrl(value: unknown): value is string {
   try { return ['http:', 'https:'].includes(new URL(value).protocol); } catch { return false; }
 }
 export function taskInput(body: Record<string, unknown>, existing?: Task) {
-  const defaults = { timezone: 'UTC', grace_minutes: 15, rerun_webhook_url: null, rerun_webhook_secret: null, paused: false, deliverable_check: 'none', deliverable_config: null, deliverable_delay_minutes: 5 };
+  const defaults = { bot: null, timezone: 'UTC', grace_minutes: 15, rerun_webhook_url: null, rerun_webhook_secret: null, paused: false, deliverable_check: 'none', deliverable_config: null, deliverable_delay_minutes: 5 };
   const data = { ...defaults, ...existing, ...body };
   if (typeof data.name !== 'string' || data.name.trim().length < 1 || data.name.length > 100) invalid('name must be 1..100 characters');
+  if (data.bot !== null && (typeof data.bot !== 'string' || data.bot.trim().length > 100)) invalid('bot must be at most 100 characters');
   if (typeof data.schedule !== 'string' || !validateExpression(data.schedule)) invalid('schedule must be a valid five-field cron');
   if (typeof data.timezone !== 'string' || !validateTimezone(data.timezone)) invalid('timezone must be a valid IANA timezone');
   const now = new Date();
@@ -50,7 +51,7 @@ export function taskInput(body: Record<string, unknown>, existing?: Task) {
   }
   // Explicit allowlist: unknown input fields never reach SQL or override credentials.
   return {
-    name: data.name as string, schedule: data.schedule as string, timezone: data.timezone as string,
+    name: data.name as string, bot: typeof data.bot === 'string' ? data.bot.trim() || null : null, schedule: data.schedule as string, timezone: data.timezone as string,
     grace_minutes: data.grace_minutes as number, alert_channel: data.alert_channel as Task['alert_channel'], alert_target: data.alert_target as string,
     rerun_webhook_url: data.rerun_webhook_url as string | null, rerun_webhook_secret: data.rerun_webhook_secret as string | null,
     deliverable_check: data.deliverable_check as Task['deliverable_check'], deliverable_config: config ? JSON.stringify(config) : null,

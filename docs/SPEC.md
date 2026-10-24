@@ -55,7 +55,7 @@ Management endpoints require `Authorization: Bearer <ADMIN_TOKEN>` (constant-tim
 - `GET /api/tasks/:id/snippet` -> text/plain onboarding snippet with the token shown as `<YOUR_PING_TOKEN>` placeholder
   (the real token is only returned by create/rotate). Public task objects never expose token hashes or webhook secret
   (expose `has_rerun_webhook: true/false`).
-- `GET /api/incidents?status=open|all` -> list.
+- `GET /api/incidents?status=open|all&task_id=<id>&limit=200` -> list.
 - Heartbeat (no admin auth; the per-task ping token in the URL is the credential, write-only):
   `POST /hb/:ping_token` JSON body `{ status?: "ok"|"fail" (default ok), run_id?, output_url?, message? }`
   also `GET /hb/:ping_token` and `POST /hb/:ping_token/fail` as no-body shortcuts (for curl one-liners).
@@ -258,3 +258,63 @@ Email alert delivery through Resend remains available.
 Phase 2 also includes the completed A/B/C corrections: only ok heartbeats resolve missed incidents;
 reminder timestamps advance only after successful sends (failed sends retry with a separate lease);
 reminder "since" uses incident.expected_at rather than incident.opened_at.
+
+
+## Dashboard Worker API (Unit 1)
+
+Migration `0008_task_bot.sql` adds nullable `tasks.bot`. Create and PATCH accept `bot` as
+null or a string trimmed to at most 100 characters; blank becomes null and omitted PATCH
+values are preserved. Public tasks and `/api/schedule` items include `bot`;
+`/admin/schedule` displays an escaped Bot column.
+
+All endpoints below require `Authorization: Bearer <ADMIN_TOKEN>`.
+
+- `GET /api/stats?days=14`: days is an integer 1..90 (default 14; invalid values return 400).
+  Returns `{ generated_at, totals, series }`. Totals contain `tasks`, `active` (not paused),
+  `paused`, `healthy`, `with_open_incidents` (distinct tasks, including paused tasks),
+  `open_incidents`, `heartbeats_24h`, and `failed_heartbeats_24h`. Healthy means not paused,
+  no open incidents, and last_status other than fail (including null). Heartbeat totals use
+  the inclusive rolling 24-hour window ending at generated_at. Series has one UTC day per
+  requested day including today, oldest first, zero-filled, with `{ date: 'YYYY-MM-DD',
+  ok, fail, incidents_opened }`. Daily counts use database GROUP BY aggregates; future
+  records after generated_at are excluded.
+- `GET /api/incidents?status=open|all&task_id=<id>&limit=200`: status defaults to open;
+  optional task_id restricts results to that task. Limit is an integer 1..500, default 200;
+  invalid limits return 400. Order remains opened_at descending then id. Each row includes
+  `task_name` and nullable `task_bot`. All incident JSON responses, including task detail,
+  run history and admin rerun, omit `rerun_token_hash`.
+- `POST /api/incidents/:id/rerun`: admin confirmation without a link token. Shares the
+  atomic claim and single webhook request with token confirmation. Returns
+  `{ ok, status, incident }` with the current rerun status and sanitized incident.
+  Success is 200, webhook failure is 502, missing incident/task is 404, and no webhook,
+  resolved incidents, previous requests or unknown results return 409. The claim requires
+  rerun_requested_at IS NULL, resolved_at IS NULL and rerun_status='none'. The webhook
+  receives Idempotency-Key equal to incident ID and optional Bearer secret; a 2xx result
+  records succeeded and resolves as rerun_ok. Existing token routes retain token checks
+  and their response formats. No automatic retry.
+
+Static hosting is prepared via Workers Static Assets at `dashboard/dist`. A future Vite
+app will use base `/dashboard/` and output `dashboard/dist/dashboard/`; no dashboard app
+is included in Unit 1. GET `/` and `/dashboard` return 302 to `/dashboard/`.
+API, heartbeat, rerun, admin and health routes remain Worker routes. The tracked
+`dashboard/dist/.gitkeep` keeps the assets directory present on fresh clones before any
+build; generated files in that directory are ignored. Keep this placeholder when building.
+
+## Dashboard app (Unit 2)
+
+`dashboard/` is an independent Vite + React + TypeScript npm package using Tailwind v4
+and CLI-installed shadcn/ui components, adapted from dashboard-01. It builds to
+`dashboard/dist/dashboard/` with base `/dashboard/`, preserving `dist/.gitkeep`.
+Hash routes cover overview, tasks, task detail, incidents, and settings without SPA fallback.
+Static Assets run the Worker first only for `/` and `/dashboard`, preserving explicit 302 redirects.
+
+The operator pastes ADMIN_TOKEN into a password login card; localStorage key
+`bw_admin_token` supplies same-origin API Bearer headers. Any 401 clears it and returns to login.
+Logout clears it; `bw_theme` stores light/dark/system preferences. Overview refreshes every
+60 seconds and displays stats, UTC daily series, and the task table. Tasks support sorting,
+filtering, pagination, create/edit validation, pause/resume, snippet copy, and confirmed deletion.
+Detail shows cursor-paginated runs, a loaded-run daily chart, incidents, and public configuration.
+Creation displays the one-time credentials and snippet. Incident re-runs require an explicit
+AlertDialog confirmation and never automatically retry. API errors, loading, and empty states
+are visible. Separate dashboard CI runs npm ci, typecheck, jsdom tests, and production build;
+the Worker test suite is scoped to test/ so the two environments remain independent.
