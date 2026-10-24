@@ -1,0 +1,25 @@
+{
+  "name": "bot-watchdog",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev": "wrangler dev",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "0.12.21",
+    "@cloudflare/workers-types": "5.20261023.1",
+    "typescript": "7.0.2",
+    "vitest": "3.2.7",
+    "wrangler": "4.152.0"
+  },
+  "dependencies": {
+    "croner": "^10.0.1"
+  }
+}
